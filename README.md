@@ -1,2 +1,52 @@
-# Turkey-Information
-FX rate, Minimum wage, all information for Turkish Business
+# 🇹🇷 터키 비즈니스 & 경제 동향 대시보드
+
+터키 관련 사업/경제 정보를 한 화면에서 확인할 수 있는 **Streamlit** 기반 반응형 웹 대시보드입니다.
+PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 만들어졌습니다.
+
+## 주요 기능
+
+1. **실시간 환율 카드** — EUR/TRY, USD/TRY, TRY/KRW 환율을 카드 형태로 크게 표시 (`yfinance` 사용)
+2. **터키 기준금리** — 최근 2년간 월별 기준금리를 라인 그래프로 표시 (`plotly` 사용)
+3. **터키 최저임금** — 최저임금(TRY)과 현재 환율 기준 EUR / USD / KRW 환산 금액
+4. **터키 현지 뉴스** — 무역·관세·최저임금·노조 관련 뉴스 3~5건 (현재는 레이아웃 확인용 더미 데이터)
+   - 제목 + 한국어 3줄 요약이 바로 보이고, `st.expander`를 펼치면 터키어 원문을 확인할 수 있습니다.
+
+## 폴더 구조
+
+```
+.
+├── app.py                    # 메인 실행 파일 (전체 화면 구성)
+├── modules/
+│   ├── fx_rates.py           # yfinance로 환율 데이터 조회
+│   ├── policy_rate.py        # 터키 기준금리 월별 데이터
+│   ├── minimum_wage.py       # 터키 최저임금 데이터 및 환율 환산
+│   └── news_data.py          # 뉴스 더미 데이터
+├── .streamlit/
+│   └── config.toml           # 테마/서버 설정
+└── requirements.txt          # 필요한 파이썬 패키지 목록
+```
+
+## 실행 방법
+
+1. 파이썬 패키지 설치
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. 앱 실행
+
+   ```bash
+   streamlit run app.py
+   ```
+
+3. 브라우저에서 `http://localhost:8501` 접속 (스마트폰에서 보려면 같은 네트워크에서 `Network URL`로 접속)
+
+## 참고 사항
+
+- 환율(EUR/TRY, USD/TRY, TRY/KRW)은 Yahoo Finance(`yfinance`) 데이터를 5분 캐시로 불러옵니다.
+  `TRY/KRW` 티커가 야후에서 직접 지원되지 않는 경우, USD를 매개로 한 교차 환율(cross rate)로 자동 계산됩니다.
+- 터키 기준금리, 최저임금 데이터는 참고용 샘플 데이터입니다. 실제 서비스에서는 터키 중앙은행(TCMB)
+  EVDS API, 터키 정부 발표 자료 등 공식 데이터로 교체하는 것을 권장합니다.
+- 뉴스 섹션은 화면 레이아웃 확인을 위한 더미(임시) 데이터입니다. 실제 뉴스 API/크롤러 연동 시
+  `modules/news_data.py`의 `get_dummy_news()` 반환값만 동일한 구조로 교체하면 됩니다.

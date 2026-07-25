@@ -1,0 +1,16 @@
+# Streamlit 앱 전역 설정 파일
+# - 넓은 레이아웃(wide)과 커스텀 테마 색상을 지정해서
+#   PC/모바일 어디서든 보기 좋은 기본 화면을 만듭니다.
+
+[theme]
+base = "light"
+primaryColor = "#C8102E"        # 터키 국기의 빨간색을 포인트 컬러로 사용
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F7"
+textColor = "#1A1A1A"
+font = "sans serif"
+
+[server]
+# 클라우드/컨테이너 환경에서 구동할 때 필요한 기본 서버 설정
+headless = true
+enableXsrfProtection = true
