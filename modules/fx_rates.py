@@ -153,3 +153,81 @@ def get_all_fx_rates():
     화면(app.py)에서는 이 함수 하나만 호출하면 됩니다.
     """
     return {key: get_fx_rate(key) for key in FX_TICKERS.keys()}
+
+
+# =============================================================================
+# 최근 3개월 환율 추이(그래프용 데이터) 조회 기능
+# -----------------------------------------------------------------------------
+# 위의 함수들은 "현재가 1개 값"만 가져오지만, 아래 함수들은 카드 아래에
+# 미니 그래프(스파크라인)를 그리기 위해 "최근 3개월치 일별 시세 전체"를
+# pandas Series/DataFrame 형태로 가져옵니다.
+# =============================================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_history(ticker: str, period: str = "3mo"):
+    """
+    특정 티커의 최근 N개월(기본 3개월) 일별 종가(Close) 데이터를 가져옵니다.
+
+    Returns
+    -------
+    pandas.Series (index=날짜, value=종가) 또는 데이터가 없으면 None
+    """
+    try:
+        data = yf.Ticker(ticker).history(period=period, interval="1d")
+        if data is None or data.empty or "Close" not in data.columns:
+            return None
+        closes = data["Close"].dropna()
+        if closes.empty:
+            return None
+        return closes
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_cross_history_try_krw(period: str = "3mo"):
+    """
+    TRY/KRW 3개월치 추이를 야후에서 직접 못 가져올 때 사용하는 대체(fallback) 함수.
+    USDTRY, USDKRW 두 시세의 날짜를 맞춘 뒤(inner join), 서로 나누어
+    TRY/KRW 교차 환율의 '기간 전체' 값을 계산합니다.
+    """
+    try:
+        usdtry = yf.Ticker("USDTRY=X").history(period=period, interval="1d")["Close"].dropna()
+        usdkrw = yf.Ticker("USDKRW=X").history(period=period, interval="1d")["Close"].dropna()
+
+        if usdtry.empty or usdkrw.empty:
+            return None
+
+        # 두 시리즈의 날짜(인덱스)를 기준으로 합쳐서, 같은 날짜에 데이터가 있는 것만 사용합니다.
+        merged = pd.concat([usdtry, usdkrw], axis=1, join="inner")
+        merged.columns = ["usdtry", "usdkrw"]
+        cross = merged["usdkrw"] / merged["usdtry"]
+        cross.name = "Close"
+        return cross
+    except Exception:
+        return None
+
+
+def get_fx_history(fx_key: str, period: str = "3mo"):
+    """
+    'EURTRY', 'USDTRY', 'TRYKRW' 중 하나를 받아서
+    최근 N개월치 환율 추이(pandas Series)를 반환하는 공개 함수입니다.
+
+    Parameters
+    ----------
+    fx_key : str
+        FX_TICKERS 딕셔너리의 key ("EURTRY", "USDTRY", "TRYKRW")
+    period : str
+        yfinance에서 사용하는 기간 문자열 (기본값 "3mo" = 최근 3개월)
+
+    Returns
+    -------
+    pandas.Series 또는 데이터를 가져오지 못하면 None
+    """
+    info = FX_TICKERS[fx_key]
+    history = _fetch_history(info["ticker"], period=period)
+
+    # TRYKRW=X 티커가 야후에서 지원되지 않는 경우 -> 교차 환율 추이로 대체
+    if (history is None or history.empty) and fx_key == "TRYKRW":
+        history = _fetch_cross_history_try_krw(period=period)
+
+    return history

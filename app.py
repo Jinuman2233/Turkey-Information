@@ -12,9 +12,11 @@
 # 모듈화(modularization)라고 하며, 코드가 길어져도 유지보수하기 쉬워집니다.
 #
 # 화면 구성 순서 (위 -> 아래):
-#   1) 상단: EUR/TRY, USD/TRY, TRY/KRW 환율 카드
+#   1) 상단: EUR/TRY, USD/TRY, TRY/KRW 환율 카드 (각 카드 아래 최근 3개월 추이 그래프 포함)
 #   2) 터키 기준금리 (최근 2년 월별 그래프)
-#   3) 터키 최저임금 + 환율 환산(EUR/USD/KRW)
+#   3) 터키 최저임금
+#      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
+#      - 시간당 최저임금 (Net, 세후 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
 #   4) 터키 현지 뉴스 (더미 데이터, 펼치면 터키어 원문 확인 가능)
 # =============================================================================
 
@@ -22,9 +24,14 @@ import streamlit as st
 import plotly.graph_objects as go
 
 # 우리가 modules 폴더에 나누어 만든 함수들을 가져옵니다.
-from modules.fx_rates import get_all_fx_rates, FX_TICKERS
+from modules.fx_rates import get_all_fx_rates, get_fx_history, FX_TICKERS
 from modules.policy_rate import get_policy_rate_dataframe, get_latest_policy_rate
-from modules.minimum_wage import get_minimum_wage_info, convert_wage_to_foreign_currencies
+from modules.minimum_wage import (
+    get_minimum_wage_info,
+    convert_wage_to_foreign_currencies,
+    get_hourly_net_wage_try,
+    MONTHLY_WORKING_HOURS,
+)
 from modules.news_data import get_dummy_news
 
 
@@ -145,6 +152,58 @@ def render_section_title(text: str):
     st.markdown(f"<div class='section-title'>{text}</div>", unsafe_allow_html=True)
 
 
+def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E", height: int = 110):
+    """
+    환율 카드 아래에 붙는 '작은 추이 그래프(스파크라인)'를 그리는 헬퍼 함수.
+
+    Parameters
+    ----------
+    history : pandas.Series
+        index=날짜, value=환율 값 (modules.fx_rates.get_fx_history()의 반환값)
+    line_color : str
+        그래프 선 색상
+    height : int
+        그래프 높이(px). 카드 안에 들어가므로 작게 설정합니다.
+    """
+    if history is None or history.empty:
+        st.caption("⚠️ 최근 3개월 추이 데이터를 불러오지 못했습니다.")
+        return
+
+    # HEX 색상(예: "#C8102E")을 투명도가 있는 rgba() 문자열로 바꿔줍니다.
+    # Plotly는 "#RRGGBBAA" 같은 8자리 HEX 표기를 지원하지 않으므로 rgba()로 변환합니다.
+    hex_color = line_color.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    fill_color = f"rgba({r}, {g}, {b}, 0.15)"
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=history.index,
+            y=history.values,
+            mode="lines",
+            line=dict(color=line_color, width=2),
+            fill="tozeroy",
+            fillcolor=fill_color,  # 선 아래를 살짝 투명하게 채워서 그래프가 더 잘 보이도록 함
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.4f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=4, b=0),
+        height=height,
+        showlegend=False,
+        xaxis=dict(showgrid=False, visible=False),  # 카드가 복잡해 보이지 않도록 축은 숨김
+        yaxis=dict(showgrid=False, visible=False),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(
+        fig,
+        width="stretch",  # 카드(컨테이너) 너비에 꽉 맞춰서 그래프를 그림
+        config={"displayModeBar": False},
+        key=chart_key,
+    )
+
+
 # =============================================================================
 # 헤더(맨 위 제목) 영역
 # =============================================================================
@@ -214,6 +273,23 @@ for col, fx_key in zip(fx_columns, FX_TICKERS.keys()):
                     unsafe_allow_html=True,
                 )
 
+                # ---------------------------------------------------------------
+                # 카드 안, 현재 환율 값 바로 아래에 "최근 3개월 추이" 미니 그래프를
+                # 추가로 보여줍니다. 그래프가 큰 숫자보다 시선을 뺏지 않도록
+                # 축/범례를 모두 숨긴 단순한 라인(스파크라인) 형태로 그립니다.
+                # ---------------------------------------------------------------
+                st.markdown(
+                    "<span class='small-caption'>최근 3개월 추이</span>",
+                    unsafe_allow_html=True,
+                )
+                with st.spinner("추이 데이터 불러오는 중..."):
+                    history_3mo = get_fx_history(fx_key, period="3mo")
+                render_mini_line_chart(
+                    history_3mo,
+                    chart_key=f"fx_mini_chart_{fx_key}",
+                    line_color=delta_color if change != 0 else "#C8102E",
+                )
+
 st.caption("데이터 출처: Yahoo Finance (yfinance) · 5분마다 자동 갱신")
 
 st.divider()
@@ -268,8 +344,8 @@ with metric_col2:
         # 모바일에서도 그래프가 화면 너비에 맞춰 자동으로 줄어들도록 설정
         autosize=True,
     )
-    # use_container_width=True 로 두면 화면(컨테이너) 너비에 맞춰 그래프가 자동으로 늘어나거나 줄어듭니다.
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    # width="stretch" 로 두면 화면(컨테이너) 너비에 맞춰 그래프가 자동으로 늘어나거나 줄어듭니다.
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 st.caption(
     "⚠️ 기준금리 데이터는 참고용 샘플 데이터입니다. 실제 서비스에서는 터키 중앙은행(TCMB)의 "
@@ -284,22 +360,25 @@ st.divider()
 # -----------------------------------------------------------------------------
 # modules/minimum_wage.py 에서 정의한 최저임금(TRY)을 위에서 이미 가져온
 # 환율 데이터(fx_rates)를 이용해 EUR / USD / KRW로 환산해서 함께 보여줍니다.
+#
+# 4-1) 월 최저임금 : Gross(세전) 기준으로 표시
+# 4-2) 시간당 최저임금 : Net(세후, 실수령액) 기준으로 표시 (월 근무시간 255시간 기준)
 # =============================================================================
-render_section_title("💰 터키 최저임금 (순 수령액 기준)")
+render_section_title("💰 터키 최저임금 (Gross, 세전 기준)")
 
 wage_info = get_minimum_wage_info()
-net_wage_try = wage_info["net_wage_try"]
+gross_wage_try = wage_info["gross_wage_try"]
 
-# 환율을 이용해 최저임금을 외화로 환산합니다.
-converted = convert_wage_to_foreign_currencies(net_wage_try, fx_rates)
+# 환율을 이용해 '월 Gross 최저임금'을 외화로 환산합니다.
+gross_converted = convert_wage_to_foreign_currencies(gross_wage_try, fx_rates)
 
 wage_col1, wage_col2, wage_col3, wage_col4 = st.columns(4)
 
 with wage_col1:
     with st.container(border=True):
-        st.markdown("**최저임금 (TRY)**")
+        st.markdown("**월 최저임금 (TRY, Gross)**")
         st.markdown(
-            f"<div class='big-number'>₺ {format_number(net_wage_try, 0)}</div>",
+            f"<div class='big-number'>₺ {format_number(gross_wage_try, 0)}</div>",
             unsafe_allow_html=True,
         )
         st.caption(f"적용 기간: {wage_info['effective_period']}")
@@ -307,7 +386,7 @@ with wage_col1:
 with wage_col2:
     with st.container(border=True):
         st.markdown("**≈ EUR (유로)**")
-        eur_value = converted["EUR"]
+        eur_value = gross_converted["EUR"]
         display_value = f"€ {format_number(eur_value, 0)}" if eur_value else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
         st.caption("현재 EUR/TRY 환율 기준")
@@ -315,7 +394,7 @@ with wage_col2:
 with wage_col3:
     with st.container(border=True):
         st.markdown("**≈ USD (달러)**")
-        usd_value = converted["USD"]
+        usd_value = gross_converted["USD"]
         display_value = f"$ {format_number(usd_value, 0)}" if usd_value else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
         st.caption("현재 USD/TRY 환율 기준")
@@ -323,12 +402,62 @@ with wage_col3:
 with wage_col4:
     with st.container(border=True):
         st.markdown("**≈ KRW (원)**")
-        krw_value = converted["KRW"]
+        krw_value = gross_converted["KRW"]
         display_value = f"₩ {format_number(krw_value, 0)}" if krw_value else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
         st.caption("현재 TRY/KRW 환율 기준")
 
 st.caption("⚠️ 최저임금 금액은 예시 기준 데이터이며, 최신 정부 발표 금액으로 업데이트가 필요합니다.")
+
+# -----------------------------------------------------------------------------
+# 4-2) 시간당 최저임금 (Net, 세후 실수령액 기준)
+# -----------------------------------------------------------------------------
+# '월 Net(세후) 최저임금'을 '월 근무시간(255시간)'으로 나누어 시간당 금액을 구하고,
+# 이를 동일한 방식으로 EUR / USD / KRW로 환산해서 보여줍니다.
+# -----------------------------------------------------------------------------
+st.markdown(
+    f"<div style='margin-top:0.8rem; font-weight:700;'>⏱️ 시간당 최저임금 "
+    f"(Net, 월 {MONTHLY_WORKING_HOURS}시간 근무 기준)</div>",
+    unsafe_allow_html=True,
+)
+
+hourly_net_wage_try = get_hourly_net_wage_try(monthly_hours=MONTHLY_WORKING_HOURS)
+hourly_converted = convert_wage_to_foreign_currencies(hourly_net_wage_try, fx_rates)
+
+hourly_col1, hourly_col2, hourly_col3, hourly_col4 = st.columns(4)
+
+with hourly_col1:
+    with st.container(border=True):
+        st.markdown("**시간당 최저임금 (TRY, Net)**")
+        st.markdown(
+            f"<div class='big-number'>₺ {format_number(hourly_net_wage_try, 2)}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"월 {format_number(wage_info['net_wage_try'], 0)} TRY ÷ {MONTHLY_WORKING_HOURS}시간")
+
+with hourly_col2:
+    with st.container(border=True):
+        st.markdown("**≈ EUR (유로)**")
+        hourly_eur = hourly_converted["EUR"]
+        display_value = f"€ {format_number(hourly_eur, 2)}" if hourly_eur else "-"
+        st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
+        st.caption("현재 EUR/TRY 환율 기준")
+
+with hourly_col3:
+    with st.container(border=True):
+        st.markdown("**≈ USD (달러)**")
+        hourly_usd = hourly_converted["USD"]
+        display_value = f"$ {format_number(hourly_usd, 2)}" if hourly_usd else "-"
+        st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
+        st.caption("현재 USD/TRY 환율 기준")
+
+with hourly_col4:
+    with st.container(border=True):
+        st.markdown("**≈ KRW (원)**")
+        hourly_krw = hourly_converted["KRW"]
+        display_value = f"₩ {format_number(hourly_krw, 0)}" if hourly_krw else "-"
+        st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
+        st.caption("현재 TRY/KRW 환율 기준")
 
 st.divider()
 

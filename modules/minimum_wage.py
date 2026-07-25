@@ -25,11 +25,38 @@ MINIMUM_WAGE_INFO = {
 }
 
 
+# -----------------------------------------------------------------------------
+# 월 근무시간 기준값
+# ※ 터키 근로기준법상 통상적인 월 근무시간을 255시간으로 가정합니다.
+#   (예: 주 6일 근무 등 사업장 관행에 따라 달라질 수 있으므로 참고용 값입니다.)
+# -----------------------------------------------------------------------------
+MONTHLY_WORKING_HOURS = 255
+
+
 def get_minimum_wage_info() -> dict:
     """
     터키 최저임금 기본 정보를 딕셔너리로 반환합니다.
     """
     return MINIMUM_WAGE_INFO
+
+
+def get_hourly_net_wage_try(monthly_hours: float = MONTHLY_WORKING_HOURS) -> float:
+    """
+    '월 순(net) 최저임금'을 '월 근무시간'으로 나누어
+    시간당 순(net) 최저임금(TRY)을 계산합니다.
+
+    Parameters
+    ----------
+    monthly_hours : float
+        월 근무시간 (기본값: 255시간)
+
+    Returns
+    -------
+    float
+        시간당 순(net) 최저임금 (TRY)
+    """
+    net_wage_try = MINIMUM_WAGE_INFO["net_wage_try"]
+    return net_wage_try / monthly_hours
 
 
 def convert_wage_to_foreign_currencies(wage_try: float, fx_rates: dict) -> dict:
