@@ -263,7 +263,26 @@ def collect_all_raw_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
 # System Instruction에는 "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인
 # 어투로 터키어/영어 뉴스를 한국어로 번역 및 요약"하도록 지시합니다.
 # =============================================================================
+# 우선 사용할 모델. 일부 환경에서는 모델 ID가 달라 실패할 수 있어,
+# 아래 후보 목록을 순서대로 시도합니다.
 GEMINI_MODEL_NAME = "gemini-1.5-flash"
+GEMINI_MODEL_CANDIDATES = (
+    "gemini-1.5-flash",
+    "models/gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash-002",
+    "gemini-2.0-flash",
+)
+
+# 예시 파일에 들어 있는 자리표시자 값. 이런 값이 secrets에 있으면
+# "키가 설정된 것처럼" 보이지만 실제 API 호출은 실패합니다.
+_PLACEHOLDER_API_KEYS = {
+    "",
+    "your-gemini-api-key-here",
+    "YOUR_GEMINI_API_KEY",
+    "xxxxxxxx",
+    "xxx",
+}
 
 # GenerativeModel의 system_instruction 으로 전달되는 지시문입니다.
 TRANSLATION_SYSTEM_PROMPT = (
@@ -273,6 +292,13 @@ TRANSLATION_SYSTEM_PROMPT = (
     "응답은 반드시 아래 JSON 형식 그대로만 출력하세요. (그 외 설명 문장 금지)\n"
     '{"title_kr": "번역된 한국어 제목", "summary_kr": ["요약 문장1", "요약 문장2", "요약 문장3"]}'
 )
+
+
+class NewsFetchError(RuntimeError):
+    """뉴스 수집/번역 실패 시, Streamlit 캐시에 실패 결과가 12시간 동안
+    남지 않도록 예외로 올리는 데 사용하는 내부 예외 클래스입니다."""
+
+    pass
 
 
 def _build_user_prompt(title_original: str, summary_original: str) -> str:
@@ -304,6 +330,16 @@ def _parse_translation_response(raw_text: str, fallback_title: str):
         return fallback_title, ["⚠️ AI 응답을 해석하지 못해 요약을 표시할 수 없습니다."]
 
 
+def _normalize_api_key(raw_value) -> str | None:
+    """키 문자열을 정리하고, 자리표시자/빈 값이면 None을 반환합니다."""
+    if raw_value is None:
+        return None
+    value = str(raw_value).strip().strip('"').strip("'")
+    if not value or value.lower() in {k.lower() for k in _PLACEHOLDER_API_KEYS}:
+        return None
+    return value
+
+
 def _get_gemini_api_key():
     """
     Gemini API 키를 안전하게 읽어옵니다.
@@ -312,20 +348,19 @@ def _get_gemini_api_key():
       1) Streamlit secrets → st.secrets["GEMINI_API_KEY"]  (배포 환경 권장)
       2) 환경변수 / .env 파일의 GEMINI_API_KEY             (로컬 개발용 보조)
 
-    secrets.toml 파일이 없거나 키가 없으면 None을 반환합니다.
+    secrets.toml 파일이 없거나 키가 없거나, 예시용 자리표시자 값이면 None을 반환합니다.
     """
     try:
         # st.secrets["GEMINI_API_KEY"] 형태로 안전하게 접근합니다.
         # secrets.toml 자체가 없는 환경에서는 예외가 날 수 있으므로 try-except로 감쌉니다.
         if "GEMINI_API_KEY" in st.secrets:
-            value = st.secrets["GEMINI_API_KEY"]
-            if value:
-                return str(value).strip()
+            normalized = _normalize_api_key(st.secrets["GEMINI_API_KEY"])
+            if normalized:
+                return normalized
     except Exception:
         pass
 
-    env_value = os.getenv("GEMINI_API_KEY")
-    return env_value.strip() if env_value else None
+    return _normalize_api_key(os.getenv("GEMINI_API_KEY"))
 
 
 def is_ai_translation_configured() -> bool:
@@ -337,87 +372,147 @@ def is_ai_translation_configured() -> bool:
     return bool(_get_gemini_api_key())
 
 
+def _extract_response_text(response) -> str:
+    """Gemini 응답 객체에서 텍스트를 안전하게 꺼냅니다."""
+    try:
+        text = getattr(response, "text", None)
+        if text:
+            return str(text).strip()
+    except Exception:
+        # response.text 접근 시 finish_reason 등으로 예외가 날 수 있어 candidates를 직접 확인합니다.
+        pass
+
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            chunks = [getattr(part, "text", "") for part in parts if getattr(part, "text", "")]
+            if chunks:
+                return "\n".join(chunks).strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _translate_with_gemini(api_key: str, title_original: str, summary_original: str):
     """
-    google-generativeai 패키지로 Gemini(gemini-1.5-flash) API를 호출해
+    google-generativeai 패키지로 Gemini API를 호출해
     뉴스 제목/요약을 한국어로 번역·요약합니다.
+
+    일부 계정/지역에서는 특정 모델 ID가 없거나 이름이 다를 수 있어,
+    GEMINI_MODEL_CANDIDATES 목록을 순서대로 시도합니다.
     """
     if genai is None:
         raise RuntimeError(
             "google-generativeai 패키지가 설치되어 있지 않습니다. "
-            "`pip install google-generativeai` 명령으로 설치해 주세요."
+            "requirements.txt에 google-generativeai가 있는지 확인하고 앱을 Reboot 해 주세요."
         )
 
     # API 키를 설정합니다. (호출마다 설정해도 무방하며, 키가 바뀌어도 안전하게 동작합니다.)
     genai.configure(api_key=api_key)
 
-    # system_instruction에 번역 어투/형식 규칙을 넣고,
-    # 사용자 메시지에는 원문 제목/요약만 넣습니다.
-    model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL_NAME,
-        system_instruction=TRANSLATION_SYSTEM_PROMPT,
-        generation_config={
-            "temperature": 0.3,  # 낮을수록 더 일관되고 정확한(창의성이 낮은) 번역 결과를 얻습니다.
-            "response_mime_type": "application/json",  # JSON만 반환하도록 유도
-        },
-    )
+    user_prompt = _build_user_prompt(title_original, summary_original)
+    last_error = None
 
-    response = model.generate_content(_build_user_prompt(title_original, summary_original))
+    for model_name in GEMINI_MODEL_CANDIDATES:
+        try:
+            # system_instruction에 번역 어투/형식 규칙을 넣고,
+            # 사용자 메시지에는 원문 제목/요약만 넣습니다.
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=TRANSLATION_SYSTEM_PROMPT,
+                generation_config={
+                    "temperature": 0.3,  # 낮을수록 더 일관되고 정확한 번역 결과를 얻습니다.
+                    "response_mime_type": "application/json",  # JSON만 반환하도록 유도
+                },
+            )
+            response = model.generate_content(user_prompt)
+            raw_text = _extract_response_text(response)
+            if not raw_text:
+                raise RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
 
-    # 응답 텍스트를 꺼냅니다. 혹시 ```json ... ``` 코드블록이 붙어 나오면 제거합니다.
-    raw_text = (getattr(response, "text", None) or "").strip()
-    raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
-    return _parse_translation_response(raw_text, fallback_title=title_original)
+            # 혹시 ```json ... ``` 코드블록이 붙어 나오면 제거합니다.
+            raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+            return _parse_translation_response(raw_text, fallback_title=title_original)
+        except Exception as exc:
+            last_error = exc
+            # 다음 후보 모델로 이어서 시도합니다.
+            continue
+
+    raise RuntimeError(f"Gemini 번역 호출 실패: {last_error}")
+
+
+def _humanize_gemini_error(exc: Exception) -> str:
+    """Gemini/네트워크 예외 메시지를 사용자가 조치하기 쉬운 안내로 바꿉니다."""
+    text = str(exc)
+    lowered = text.lower()
+
+    if "api key" in lowered or "api_key" in lowered or "invalid" in lowered and "key" in lowered:
+        return (
+            "Gemini API 키가 올바르지 않습니다. "
+            "Streamlit Cloud → App settings → Secrets 에 "
+            '`GEMINI_API_KEY = "실제키"` 형태로 넣었는지 확인한 뒤 Reboot 해 주세요.'
+        )
+    if "permission" in lowered or "403" in lowered:
+        return (
+            "Gemini API 권한 오류(403)입니다. "
+            "Google AI Studio에서 키를 다시 발급받고, Generative Language API 사용이 가능한지 확인해 주세요."
+        )
+    if "quota" in lowered or "429" in lowered or "rate" in lowered:
+        return "Gemini API 사용량 한도(쿼터)를 초과했습니다. 잠시 후 다시 시도해 주세요."
+    if "not found" in lowered and "model" in lowered:
+        return (
+            f"요청한 Gemini 모델을 찾을 수 없습니다. ({text}) "
+            "모델 이름(gemini-1.5-flash)이 계정에서 지원되는지 확인해 주세요."
+        )
+    if "google-generativeai" in lowered or "패키지" in text:
+        return text
+    return f"Gemini/네트워크 오류: {text}"
 
 
 # =============================================================================
-# 4. 최종 공개 함수 — app.py에서는 이 함수 하나만 호출하면 됩니다.
+# 4. 최종 공개 함수 — app.py에서는 fetch_ai_translated_news()를 호출하면 됩니다.
 # -----------------------------------------------------------------------------
-# @st.cache_data(ttl=43200)를 적용해서, 한 번 번역한 결과는 12시간 동안 그대로
-# 재사용합니다. 이렇게 하면
-#   1) 사용자가 새로고침할 때마다 매번 Gemini API를 호출하지 않아도 되어
-#      "API 호출 비용"이 크게 절감되고,
-#   2) 이미 계산된 결과를 즉시 보여주므로 "대시보드 로딩 속도"도 빨라집니다.
+# 성공한 번역 결과만 12시간 캐시합니다.
+# 실패 결과는 예외로 올려서 Streamlit 캐시에 12시간 동안 남지 않게 합니다.
+# (키가 잘못됐거나 패키지 설치 전 실패가 캐시에 고착되는 문제를 방지)
 # =============================================================================
 @st.cache_data(
     ttl=CACHE_TTL_SECONDS,
     show_spinner="최신 터키 뉴스를 수집하고 Gemini로 한국어 번역하는 중입니다... (최대 1분 정도 걸릴 수 있어요)",
 )
-def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
-    """
-    5가지 주제에 대한 최신 터키 뉴스를 수집한 뒤, Gemini API로 한국어 번역/요약까지
-    완료한 결과를 리스트로 반환합니다.
+def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
+    """성공한 뉴스 리스트만 캐시합니다. 실패 시 NewsFetchError를 발생시킵니다."""
+    if genai is None:
+        raise NewsFetchError(
+            "google-generativeai 패키지가 설치되어 있지 않습니다. "
+            "requirements.txt 반영 후 Streamlit Cloud에서 앱을 Reboot 해 주세요."
+        )
 
-    반환되는 각 뉴스 항목의 형태 (modules/news_data.py의 더미 데이터와 동일한 구조):
-        {
-            "category": "무역·관세",
-            "title_kr": "번역된 한국어 제목",
-            "summary_kr": ["요약1", "요약2", "요약3"],
-            "link": "원문 기사 링크",
-            "source": "언론사 이름",
-            "date": "YYYY-MM-DD",
-        }
-
-    GEMINI_API_KEY가 설정되어 있지 않거나, 기사 수집/번역에 실패하면 빈 리스트([])를
-    반환합니다. app.py에서는 빈 리스트가 반환되면 더미 뉴스를 대신 보여줍니다.
-    """
     api_key = _get_gemini_api_key()
     if not api_key:
-        return []
+        raise NewsFetchError(
+            "GEMINI_API_KEY가 설정되지 않았거나 예시 값(your-gemini-api-key-here) 그대로입니다."
+        )
 
     raw_news_list = collect_all_raw_news(max_per_topic=max_per_topic)
     if not raw_news_list:
-        return []
+        raise NewsFetchError(
+            "구글 뉴스 RSS에서 기사를 가져오지 못했습니다. "
+            "네트워크/방화벽 문제이거나 Google News RSS 접근이 차단되었을 수 있습니다."
+        )
 
     translated_news = []
+    last_error = None
     for raw in raw_news_list:
         try:
             title_kr, summary_kr = _translate_with_gemini(
                 api_key, raw["title_original"], raw["summary_original"]
             )
-        except Exception:
-            # 특정 기사 하나의 번역이 실패(API 오류, 요금 한도 초과 등)하더라도
-            # 전체 뉴스 목록이 통째로 실패하지 않도록 해당 기사만 건너뜁니다.
+        except Exception as exc:
+            last_error = exc
+            # 특정 기사 하나의 번역이 실패하더라도 나머지는 계속 시도합니다.
             continue
 
         translated_news.append(
@@ -431,4 +526,36 @@ def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
             }
         )
 
+    if not translated_news:
+        raise NewsFetchError(_humanize_gemini_error(last_error or RuntimeError("알 수 없는 번역 오류")))
+
     return translated_news
+
+
+def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC) -> dict:
+    """
+    app.py에서 사용하는 공개 함수입니다.
+
+    Returns
+    -------
+    dict
+        {
+            "news": [뉴스 dict ...],
+            "error": None 또는 사용자용 오류 안내 문자열,
+        }
+    """
+    try:
+        news = _cached_ai_translated_news(max_per_topic=max_per_topic)
+        return {"news": news, "error": None}
+    except NewsFetchError as exc:
+        return {"news": [], "error": str(exc)}
+    except Exception as exc:
+        return {"news": [], "error": _humanize_gemini_error(exc)}
+
+
+def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
+    """
+    하위 호환용 함수. 뉴스 리스트만 필요할 때 사용합니다.
+    실패 시 빈 리스트를 반환합니다.
+    """
+    return fetch_ai_translated_news(max_per_topic=max_per_topic)["news"]

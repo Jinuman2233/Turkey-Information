@@ -93,6 +93,24 @@ GEMINI_API_KEY=your-gemini-api-key-here
 
 > ⚠️ `.env`와 `secrets.toml`은 모두 `.gitignore`에 등록되어 있어 실수로 GitHub에 올라가지 않습니다.
 
+### 실시간 뉴스가 예시 데이터로만 나올 때
+
+화면에 `실시간 뉴스를 가져오지 못했습니다` 경고가 보이면, 보통 아래 중 하나입니다.
+
+1. Streamlit Cloud **Secrets**에 `GEMINI_API_KEY`가 없거나, 예시 값(`your-gemini-api-key-here`) 그대로임  
+2. Secrets 저장 후 앱을 **Reboot**하지 않음  
+3. 키가 잘못되었거나 Google AI Studio에서 비활성화됨  
+4. 배포 환경에 `google-generativeai` 패키지가 아직 설치되지 않음 (`requirements.txt` 반영 + Reboot 필요)
+
+Secrets 예시:
+
+```toml
+GEMINI_API_KEY = "AIzaSy...."
+```
+
+저장 후 앱 우측 하단 메뉴 → **Reboot app** 을 한 번 실행해 주세요.  
+경고 메시지에 표시되는 **원인** 문구를 보면 어디를 고쳐야 하는지 바로 확인할 수 있습니다.
+
 ## 참고 사항
 
 - 환율(EUR/TRY, USD/TRY, TRY/KRW)은 Yahoo Finance(`yfinance`) 데이터를 5분 캐시로 불러옵니다.

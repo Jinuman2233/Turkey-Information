@@ -34,7 +34,7 @@ from modules.minimum_wage import (
     MONTHLY_WORKING_HOURS,
 )
 from modules.news_data import get_dummy_news
-from modules.news_crawler import get_ai_translated_news, is_ai_translation_configured
+from modules.news_crawler import fetch_ai_translated_news, is_ai_translation_configured
 
 
 # =============================================================================
@@ -514,17 +514,25 @@ render_section_title("📰 실시간 터키 뉴스 (AI 한국어 번역)")
 ai_ready = is_ai_translation_configured()
 
 if ai_ready:
-    # get_ai_translated_news()는 내부적으로 @st.cache_data(ttl=12시간)가 적용되어 있어서,
-    # 캐시가 살아있는 동안에는 API를 다시 호출하지 않고 즉시 결과를 돌려줍니다.
-    news_list = get_ai_translated_news()
+    # fetch_ai_translated_news()는 성공한 결과만 12시간 캐시합니다.
+    # 실패 원인은 error 메시지로 돌려주어, 사용자가 바로 조치할 수 있게 합니다.
+    news_result = fetch_ai_translated_news()
+    news_list = news_result.get("news") or []
+    news_error = news_result.get("error")
 
     if news_list:
         is_dummy_news = False
     else:
-        # API 키는 설정돼 있지만 수집/번역에 실패한 경우 (네트워크 오류, 요금 한도 초과 등)
+        # API 키는 설정돼 있지만 수집/번역에 실패한 경우
         st.warning(
-            "⚠️ 실시간 뉴스를 가져오지 못했습니다 (네트워크 오류 또는 API 호출 실패). "
-            "우선 예시 데이터를 표시합니다."
+            "⚠️ 실시간 뉴스를 가져오지 못했습니다. 우선 예시 데이터를 표시합니다.\n\n"
+            f"**원인:** {news_error or '알 수 없는 오류'}\n\n"
+            "**확인 체크리스트**\n"
+            "1. Streamlit Cloud → **App settings → Secrets** 에 아래가 있는지 확인\n"
+            '   `GEMINI_API_KEY = "AIza...실제키"`  (예시 값 your-gemini-api-key-here 이면 안 됨)\n'
+            "2. Secrets 저장 후 앱 메뉴에서 **Reboot** 실행\n"
+            "3. Google AI Studio(https://aistudio.google.com/apikey)에서 키가 유효한지 확인\n"
+            "4. 배포 후 `google-generativeai` 패키지가 설치되도록 requirements.txt가 main에 반영됐는지 확인"
         )
         news_list = get_dummy_news()
         is_dummy_news = True
@@ -532,8 +540,9 @@ else:
     # GEMINI_API_KEY가 설정되어 있지 않은 경우
     st.info(
         "💡 AI 번역 기능을 사용하려면 Gemini API 키(GEMINI_API_KEY)를 설정해 주세요. "
-        "설정 전까지는 예시(더미) 뉴스를 표시합니다. "
-        "(설정 방법: .streamlit/secrets.toml 또는 README.md 참고)"
+        "설정 전까지는 예시(더미) 뉴스를 표시합니다.\n\n"
+        "Streamlit Cloud: App settings → Secrets 에 "
+        '`GEMINI_API_KEY = "AIza..."` 를 추가한 뒤 **Reboot** 해 주세요.'
     )
     news_list = get_dummy_news()
     is_dummy_news = True
