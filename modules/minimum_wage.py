@@ -40,10 +40,10 @@ def get_minimum_wage_info() -> dict:
     return MINIMUM_WAGE_INFO
 
 
-def get_hourly_net_wage_try(monthly_hours: float = MONTHLY_WORKING_HOURS) -> float:
+def get_hourly_gross_wage_try(monthly_hours: float = MONTHLY_WORKING_HOURS) -> float:
     """
-    '월 순(net) 최저임금'을 '월 근무시간'으로 나누어
-    시간당 순(net) 최저임금(TRY)을 계산합니다.
+    '월 세전(Gross) 최저임금'을 '월 근무시간'으로 나누어
+    시간당 세전(Gross) 최저임금(TRY)을 계산합니다.
 
     Parameters
     ----------
@@ -53,10 +53,10 @@ def get_hourly_net_wage_try(monthly_hours: float = MONTHLY_WORKING_HOURS) -> flo
     Returns
     -------
     float
-        시간당 순(net) 최저임금 (TRY)
+        시간당 세전(Gross) 최저임금 (TRY)
     """
-    net_wage_try = MINIMUM_WAGE_INFO["net_wage_try"]
-    return net_wage_try / monthly_hours
+    gross_wage_try = MINIMUM_WAGE_INFO["gross_wage_try"]
+    return gross_wage_try / monthly_hours
 
 
 def convert_wage_to_foreign_currencies(wage_try: float, fx_rates: dict) -> dict:
