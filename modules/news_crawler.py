@@ -108,11 +108,29 @@ NEWS_TOPICS = [
 
 # 한 번에 캐시가 갱신될 때 API 호출 비용을 통제하기 위한 기본값들입니다.
 DEFAULT_MAX_ARTICLES_PER_TOPIC = 1  # 주제(5개)당 몇 개의 기사를 가져올지 (5개 주제 x 1개 = 총 5개 기사)
-CACHE_TTL_SECONDS = 60 * 60 * 6  # 6시간 (새로고침할 때마다 API를 다시 치지 않도록 캐시 유지)
+CACHE_TTL_SECONDS = 60 * 60 * 6  # 6시간 (성공한 번역 결과 캐시)
 BATCH_API_SLEEP_SECONDS = 4  # 배치를 2번 이상 나눠 호출할 때, 호출 사이 대기 시간(초)
-# Gemini 무료 티어는 대략 분당 15회(15 RPM) 제한이 있어, 기사마다 개별 호출하면
-# 쉽게 429(Quota Exceeded)가 납니다. 그래서 번역은 배치로 1~2회만 호출합니다.
-API_RATE_LIMIT_MESSAGE = "현재 API 처리 지연 중입니다. 1분 후 새로고침 해주세요"
+# ⚠️ 429가 난 뒤 새로고침할 때마다 API를 다시 치면, 제한이 더 오래가거나 일일 한도를
+# 더 빨리 소진합니다. 그래서 429 결과는 아래 쿨다운 시간 동안 재호출하지 않습니다.
+RATE_LIMIT_COOLDOWN_SECONDS = 180  # 분당(RPM) 제한: 3분 동안 재호출 금지
+DAILY_QUOTA_COOLDOWN_SECONDS = 60 * 60  # 일일 한도: 1시간 동안 재호출 금지
+# Gemini 무료 티어는 대략 분당 15회(15 RPM) + 일일 요청 한도가 있습니다.
+API_RATE_LIMIT_MESSAGE = (
+    "현재 API 처리 지연 중입니다. 약 3분 후 새로고침 해주세요. "
+    "(연속 새로고침은 제한을 더 악화시킬 수 있습니다)"
+)
+API_DAILY_QUOTA_MESSAGE = (
+    "Gemini 무료 티어 일일 사용량을 초과한 것 같습니다. "
+    "오늘은 예시 뉴스로 보시고, 내일 다시 시도하거나 "
+    "Google AI Studio에서 사용량/플랜을 확인해 주세요."
+)
+
+# 프로세스 전역 쿨다운 상태.
+# 429가 난 뒤에도 예외는 @st.cache_data에 저장되지 않아, 새로고침할 때마다
+# Gemini를 다시 호출하며 제한이 더 길어지거나 일일 한도를 소진합니다.
+# 그래서 여기서 "재호출 금지 시각"을 기억해 두었다가, 쿨다운이 끝날 때까지
+# API를 치지 않고 같은 안내 메시지만 반환합니다.
+_cooldown_state: dict = {"until": 0.0, "error": "", "kind": ""}
 
 
 # =============================================================================
@@ -269,14 +287,11 @@ def collect_all_raw_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
 # System Instruction에는 "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인
 # 어투로 터키어/영어 뉴스를 한국어로 번역 및 요약"하도록 지시합니다.
 # =============================================================================
-# 우선 사용할 모델. 일부 환경에서는 모델 ID가 달라 실패할 수 있어,
-# 아래 후보 목록을 순서대로 시도합니다.
+# 우선 사용할 모델. 후보를 많이 두면 실패 시마다 API를 여러 번 호출해
+# 429(RPM) 제한을 더 쉽게 유발하므로, 후보는 최소로 유지합니다.
 GEMINI_MODEL_NAME = "gemini-1.5-flash"
 GEMINI_MODEL_CANDIDATES = (
     "gemini-1.5-flash",
-    "models/gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash-002",
     "gemini-2.0-flash",
 )
 
@@ -312,7 +327,10 @@ class NewsFetchError(RuntimeError):
 class GeminiRateLimitError(NewsFetchError):
     """Gemini 429 / Quota Exceeded 전용 예외."""
 
-    pass
+    def __init__(self, message: str, kind: str = "minute"):
+        super().__init__(message)
+        # kind: "minute" (분당 RPM) 또는 "daily" (일일 한도)
+        self.kind = kind
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -326,6 +344,29 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         or "resource exhausted" in text
         or "too many requests" in text
     )
+
+
+def _is_daily_quota_error(exc: Exception) -> bool:
+    """일일 사용량 초과인지 판별합니다. (1분만 기다려서는 해결되지 않음)"""
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "per day",
+            "perday",
+            "per_day",
+            "daily",
+            "day_tier",
+            "requestsperday",
+            "generate_content_free_tier_requests",
+        )
+    )
+
+
+def _is_model_not_found_error(exc: Exception) -> bool:
+    """모델이 없어서 다음 후보를 시도해도 되는 오류인지 판별합니다."""
+    text = str(exc).lower()
+    return ("not found" in text and "model" in text) or "404" in text
 
 
 def _build_batch_user_prompt(raw_news_batch: list) -> str:
@@ -473,11 +514,18 @@ def _extract_response_text(response) -> str:
     return ""
 
 
+def _raise_rate_limit(exc: Exception):
+    """429/쿼터 예외를 분당/일일 종류에 맞는 GeminiRateLimitError로 변환해 올립니다."""
+    if _is_daily_quota_error(exc):
+        raise GeminiRateLimitError(API_DAILY_QUOTA_MESSAGE, kind="daily") from exc
+    raise GeminiRateLimitError(API_RATE_LIMIT_MESSAGE, kind="minute") from exc
+
+
 def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     """
     Gemini API를 1회 호출해 텍스트 응답을 반환합니다.
-    모델 후보를 순서대로 시도하되, 429(쿼터 초과)가 나면 즉시 중단합니다.
-    (모델 폴백을 계속하면 RPM을 더 소모해 상황이 악화됩니다.)
+    모델 후보는 '모델을 찾을 수 없음'일 때만 다음으로 넘어가고,
+    429가 나면 즉시 중단합니다. (폴백을 남발하면 RPM이 더 소모됩니다.)
     """
     if genai is None:
         raise RuntimeError(
@@ -488,7 +536,7 @@ def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     genai.configure(api_key=api_key)
     last_error = None
 
-    for model_name in GEMINI_MODEL_CANDIDATES:
+    for model_index, model_name in enumerate(GEMINI_MODEL_CANDIDATES):
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
@@ -503,12 +551,18 @@ def _call_gemini_once(api_key: str, user_prompt: str) -> str:
             if not raw_text:
                 raise RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
             return raw_text
+        except GeminiRateLimitError:
+            raise
         except Exception as exc:
             if _is_rate_limit_error(exc):
-                raise GeminiRateLimitError(API_RATE_LIMIT_MESSAGE) from exc
+                _raise_rate_limit(exc)
             last_error = exc
-            # 모델이 없거나 일시 오류인 경우에만 다음 후보로 넘어갑니다.
-            continue
+            # 모델 ID가 없는 경우에만 다음 후보를 시도합니다.
+            # 그 외 오류에서 계속 시도하면 요청 수만 늘어 429를 유발합니다.
+            if _is_model_not_found_error(exc) and model_index < len(GEMINI_MODEL_CANDIDATES) - 1:
+                time.sleep(BATCH_API_SLEEP_SECONDS)
+                continue
+            break
 
     raise RuntimeError(f"Gemini 번역 호출 실패: {last_error}")
 
@@ -546,12 +600,18 @@ def _translate_news_batch_with_gemini(api_key: str, raw_news_list: list) -> list
 
 def _humanize_gemini_error(exc: Exception) -> str:
     """Gemini/네트워크 예외 메시지를 사용자가 조치하기 쉬운 안내로 바꿉니다."""
-    if isinstance(exc, GeminiRateLimitError) or _is_rate_limit_error(exc):
+    if isinstance(exc, GeminiRateLimitError):
+        return API_DAILY_QUOTA_MESSAGE if exc.kind == "daily" else API_RATE_LIMIT_MESSAGE
+    if _is_daily_quota_error(exc):
+        return API_DAILY_QUOTA_MESSAGE
+    if _is_rate_limit_error(exc):
         return API_RATE_LIMIT_MESSAGE
 
     text = str(exc)
     lowered = text.lower()
 
+    if API_DAILY_QUOTA_MESSAGE in text:
+        return API_DAILY_QUOTA_MESSAGE
     if API_RATE_LIMIT_MESSAGE in text:
         return API_RATE_LIMIT_MESSAGE
 
@@ -576,11 +636,35 @@ def _humanize_gemini_error(exc: Exception) -> str:
     return f"Gemini/네트워크 오류: {text}"
 
 
+def _activate_rate_limit_cooldown(exc: GeminiRateLimitError) -> None:
+    """429/일일 한도 오류 발생 시각부터 쿨다운을 겁니다."""
+    seconds = (
+        DAILY_QUOTA_COOLDOWN_SECONDS if exc.kind == "daily" else RATE_LIMIT_COOLDOWN_SECONDS
+    )
+    _cooldown_state["until"] = time.time() + seconds
+    _cooldown_state["error"] = str(exc) or _humanize_gemini_error(exc)
+    _cooldown_state["kind"] = exc.kind
+
+
+def clear_news_fetch_cooldown() -> None:
+    """쿨다운을 해제해 즉시 Gemini 재시도를 허용합니다. (UI '다시 시도' 버튼용)"""
+    _cooldown_state["until"] = 0.0
+    _cooldown_state["error"] = ""
+    _cooldown_state["kind"] = ""
+
+
+def get_news_fetch_cooldown_remaining() -> int:
+    """쿨다운 잔여 초(없으면 0)를 반환합니다."""
+    remaining = int(_cooldown_state["until"] - time.time())
+    return max(0, remaining)
+
+
 # =============================================================================
 # 4. 최종 공개 함수 — app.py에서는 fetch_ai_translated_news()를 호출하면 됩니다.
 # -----------------------------------------------------------------------------
 # 성공한 번역 결과만 @st.cache_data(ttl=21600, 6시간)으로 캐시합니다.
-# 실패 결과는 예외로 올려서 캐시에 고착되지 않게 합니다.
+# 429/일일 한도 실패는 예외로 올리되, fetch 단계에서 쿨다운을 걸어
+# 새로고침해도 Gemini를 다시 호출하지 않습니다.
 # 번역은 기사별 개별 호출이 아니라 배치 1~2회로 RPM 제한을 피합니다.
 # =============================================================================
 @st.cache_data(
@@ -630,14 +714,14 @@ def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOP
 
         return translated_news
     except GeminiRateLimitError:
-        # 429는 그대로 올려서 화면에서 안내 메시지를 보여줍니다.
+        # 429는 그대로 올려서 fetch 단계에서 쿨다운을 걸도록 합니다.
         raise
     except NewsFetchError:
         raise
     except Exception as exc:
         # 예기치 못한 예외도 앱이 멈추지 않도록 NewsFetchError로 감쌉니다.
         if _is_rate_limit_error(exc):
-            raise GeminiRateLimitError(API_RATE_LIMIT_MESSAGE) from exc
+            _raise_rate_limit(exc)
         raise NewsFetchError(_humanize_gemini_error(exc)) from exc
 
 
@@ -652,17 +736,64 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
         {
             "news": [뉴스 dict ...],
             "error": None 또는 사용자용 오류 안내 문자열,
+            "cooldown_remaining": 쿨다운 잔여 초(없으면 0),
+            "error_kind": None | "minute" | "daily" | "other",
         }
     """
+    # 쿨다운 중이면 Gemini를 절대 다시 호출하지 않습니다.
+    remaining = get_news_fetch_cooldown_remaining()
+    if remaining > 0 and _cooldown_state["error"]:
+        return {
+            "news": [],
+            "error": _cooldown_state["error"],
+            "cooldown_remaining": remaining,
+            "error_kind": _cooldown_state["kind"] or "minute",
+        }
+
     try:
         news = _cached_ai_translated_news(max_per_topic=max_per_topic)
-        return {"news": news, "error": None}
-    except GeminiRateLimitError:
-        return {"news": [], "error": API_RATE_LIMIT_MESSAGE}
+        # 성공하면 이전 쿨다운 잔여 상태를 정리합니다.
+        clear_news_fetch_cooldown()
+        return {
+            "news": news,
+            "error": None,
+            "cooldown_remaining": 0,
+            "error_kind": None,
+        }
+    except GeminiRateLimitError as exc:
+        _activate_rate_limit_cooldown(exc)
+        return {
+            "news": [],
+            "error": str(exc) or _humanize_gemini_error(exc),
+            "cooldown_remaining": get_news_fetch_cooldown_remaining(),
+            "error_kind": exc.kind,
+        }
     except NewsFetchError as exc:
-        return {"news": [], "error": str(exc)}
+        return {
+            "news": [],
+            "error": str(exc),
+            "cooldown_remaining": 0,
+            "error_kind": "other",
+        }
     except Exception as exc:
-        return {"news": [], "error": _humanize_gemini_error(exc)}
+        if _is_rate_limit_error(exc):
+            rate_exc = GeminiRateLimitError(
+                _humanize_gemini_error(exc),
+                kind="daily" if _is_daily_quota_error(exc) else "minute",
+            )
+            _activate_rate_limit_cooldown(rate_exc)
+            return {
+                "news": [],
+                "error": str(rate_exc),
+                "cooldown_remaining": get_news_fetch_cooldown_remaining(),
+                "error_kind": rate_exc.kind,
+            }
+        return {
+            "news": [],
+            "error": _humanize_gemini_error(exc),
+            "cooldown_remaining": 0,
+            "error_kind": "other",
+        }
 
 
 def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):

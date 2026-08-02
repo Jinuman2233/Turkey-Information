@@ -34,7 +34,13 @@ from modules.minimum_wage import (
     MONTHLY_WORKING_HOURS,
 )
 from modules.news_data import get_dummy_news
-from modules.news_crawler import fetch_ai_translated_news, is_ai_translation_configured
+from modules.news_crawler import (
+    API_DAILY_QUOTA_MESSAGE,
+    API_RATE_LIMIT_MESSAGE,
+    clear_news_fetch_cooldown,
+    fetch_ai_translated_news,
+    is_ai_translation_configured,
+)
 
 
 # =============================================================================
@@ -515,27 +521,55 @@ ai_ready = is_ai_translation_configured()
 
 if ai_ready:
     # fetch_ai_translated_news()는 성공한 결과만 6시간 캐시합니다.
-    # 실패해도 화면이 멈추지 않도록 error 메시지만 받아 안내합니다.
+    # 429가 나면 쿨다운 동안 API를 다시 치지 않고 안내만 반환합니다.
     try:
         news_result = fetch_ai_translated_news()
     except Exception:
         # 예외가 밖으로 새어 나와도 대시보드 전체가 죽지 않도록 최종 방어선
         news_result = {
             "news": [],
-            "error": "현재 API 처리 지연 중입니다. 1분 후 새로고침 해주세요",
+            "error": API_RATE_LIMIT_MESSAGE,
+            "cooldown_remaining": 0,
+            "error_kind": "minute",
         }
 
     news_list = news_result.get("news") or []
     news_error = news_result.get("error")
+    error_kind = news_result.get("error_kind")
+    cooldown_remaining = int(news_result.get("cooldown_remaining") or 0)
 
     if news_list:
         is_dummy_news = False
     else:
         # API 키는 설정돼 있지만 수집/번역에 실패한 경우
-        rate_limit_msg = "현재 API 처리 지연 중입니다. 1분 후 새로고침 해주세요"
-        if news_error and rate_limit_msg in str(news_error):
-            # 429 / Quota Exceeded — 요청하신 안내 문구를 그대로 보여줍니다.
-            st.warning(f"⚠️ {rate_limit_msg}")
+        error_text = str(news_error or "")
+        is_daily_quota = (
+            error_kind == "daily"
+            or error_text == API_DAILY_QUOTA_MESSAGE
+            or "일일 사용량" in error_text
+        )
+        is_rate_limit = (
+            error_kind == "minute"
+            or error_text == API_RATE_LIMIT_MESSAGE
+            or "API 처리 지연" in error_text
+            or "1분 후 새로고침" in error_text  # 이전 문구 호환
+        )
+
+        if is_daily_quota:
+            # 일일 한도 — 1~3분 기다려도 해결되지 않습니다.
+            st.warning(f"⚠️ {API_DAILY_QUOTA_MESSAGE}")
+        elif is_rate_limit:
+            wait_hint = (
+                f" (자동 재시도까지 약 {max(1, cooldown_remaining // 60)}분 남음)"
+                if cooldown_remaining > 0
+                else ""
+            )
+            st.warning(f"⚠️ {API_RATE_LIMIT_MESSAGE}{wait_hint}")
+            # 쿨다운을 무시하고 강제로 다시 치려면 이 버튼을 사용합니다.
+            # (남발하면 다시 429/일일 한도에 걸릴 수 있습니다.)
+            if st.button("지금 다시 시도", key="retry_gemini_news"):
+                clear_news_fetch_cooldown()
+                st.rerun()
         else:
             st.warning(
                 "⚠️ 실시간 뉴스를 가져오지 못했습니다. 우선 예시 데이터를 표시합니다.\n\n"
