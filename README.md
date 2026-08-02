@@ -11,22 +11,29 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 3. **터키 최저임금**
    - 월 최저임금(**Gross, 세전 기준**)과 현재 환율 기준 EUR / USD / KRW 환산 금액
    - 시간당 최저임금(**Gross, 세전 기준**, 월 근무시간 255시간 가정)과 EUR / USD / KRW 환산 금액
-4. **터키 현지 뉴스** — 무역·관세·최저임금·노조 관련 뉴스 3~5건 (현재는 레이아웃 확인용 더미 데이터)
-   - 제목 + 한국어 3줄 요약이 바로 보이고, `st.expander`를 펼치면 터키어 원문을 확인할 수 있습니다.
+4. **실시간 터키 뉴스 + AI 한국어 번역** — 무역·관세 / 이민·비자 / 노무·노동조합 / 물류·인프라 /
+   외투기업·제조업 규제, 5가지 주제의 최신 뉴스를 구글 뉴스(Google News RSS)에서 자동 수집하고,
+   OpenAI(또는 Gemini) API로 한국어 번역·요약까지 자동으로 처리합니다.
+   - 메인 화면에는 번역된 **한국어 제목만** 깔끔한 리스트로 표시됩니다.
+   - 제목을 클릭(`st.expander`)하면 한국어 3줄 요약과 **원문 기사 링크**(새 창으로 열림)가 펼쳐집니다.
+   - API 키가 없거나 수집/번역에 실패하면, 레이아웃 확인용 예시(더미) 뉴스로 자동 대체됩니다.
 
 ## 폴더 구조
 
 ```
 .
-├── app.py                    # 메인 실행 파일 (전체 화면 구성)
+├── app.py                       # 메인 실행 파일 (전체 화면 구성)
 ├── modules/
-│   ├── fx_rates.py           # yfinance로 환율 데이터 조회
-│   ├── policy_rate.py        # 터키 기준금리 월별 데이터
-│   ├── minimum_wage.py       # 터키 최저임금 데이터 및 환율 환산
-│   └── news_data.py          # 뉴스 더미 데이터
+│   ├── fx_rates.py              # yfinance로 환율 데이터 조회
+│   ├── policy_rate.py           # 터키 기준금리 월별 데이터
+│   ├── minimum_wage.py          # 터키 최저임금 데이터 및 환율 환산
+│   ├── news_data.py             # 뉴스 더미(예시) 데이터 — 실시간 수집 실패 시 대체용
+│   └── news_crawler.py          # 구글 뉴스 RSS 자동 수집 + AI(OpenAI/Gemini) 한국어 번역
 ├── .streamlit/
-│   └── config.toml           # 테마/서버 설정
-└── requirements.txt          # 필요한 파이썬 패키지 목록
+│   ├── config.toml              # 테마/서버 설정
+│   └── secrets.toml.example     # API 키 설정 예시 (실제 secrets.toml은 Git에 올리지 않음)
+├── .env.example                 # API 키 설정 예시 (.env 파일용)
+└── requirements.txt             # 필요한 파이썬 패키지 목록
 ```
 
 ## 실행 방법
@@ -37,13 +44,60 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
    pip install -r requirements.txt
    ```
 
-2. 앱 실행
+2. (선택) AI 뉴스 번역 기능을 쓰려면 API 키를 설정합니다 — 아래 [AI 뉴스 번역 기능 설정](#-ai-뉴스-번역-기능-설정) 참고
+   - 설정하지 않아도 앱은 정상적으로 실행되며, 뉴스 섹션은 예시(더미) 데이터로 표시됩니다.
+
+3. 앱 실행
 
    ```bash
    streamlit run app.py
    ```
 
-3. 브라우저에서 `http://localhost:8501` 접속 (스마트폰에서 보려면 같은 네트워크에서 `Network URL`로 접속)
+4. 브라우저에서 `http://localhost:8501` 접속 (스마트폰에서 보려면 같은 네트워크에서 `Network URL`로 접속)
+
+## 🔑 AI 뉴스 번역 기능 설정
+
+실시간 뉴스 자동 수집 자체는 API 키 없이도 동작하지만(구글 뉴스는 무료 공개 RSS), 이를 **한국어로
+번역**하려면 OpenAI(또는 Gemini) API 키가 필요합니다. 아래 두 가지 방법 중 편한 방법을 사용하세요.
+
+### 방법 1) `.env` 파일 사용 (로컬 개발 환경 추천)
+
+```bash
+cp .env.example .env
+```
+
+그 다음 `.env` 파일을 열어 아래처럼 실제 발급받은 키를 입력합니다.
+
+```
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### 방법 2) Streamlit `secrets.toml` 사용 (Streamlit Community Cloud 배포 시 추천)
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+그 다음 `.streamlit/secrets.toml` 파일을 열어 실제 키를 입력합니다.
+
+```toml
+OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+Streamlit Community Cloud에 배포할 때는 앱 설정(App settings) → **Secrets** 메뉴에 동일한 내용을
+붙여넣으면 됩니다.
+
+> ⚠️ `.env`와 `secrets.toml`은 모두 `.gitignore`에 등록되어 있어 실수로 GitHub에 올라가지 않습니다.
+
+### (선택) OpenAI 대신 Gemini API 사용하기
+
+```
+AI_PROVIDER=gemini
+GEMINI_API_KEY=your-gemini-api-key-here
+```
+
+위 두 줄을 `.env`(또는 `secrets.toml`)에 추가하고, `pip install google-genai`로 패키지를 추가
+설치하면 Gemini API로 번역하도록 전환됩니다.
 
 ## 참고 사항
 
@@ -52,5 +106,8 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
   최근 3개월 추이 그래프도 동일한 방식(직접 조회 → 실패 시 교차 환율 계산)으로 데이터를 가져옵니다.
 - 터키 기준금리, 최저임금 데이터는 참고용 샘플 데이터입니다. 실제 서비스에서는 터키 중앙은행(TCMB)
   EVDS API, 터키 정부 발표 자료 등 공식 데이터로 교체하는 것을 권장합니다.
-- 뉴스 섹션은 화면 레이아웃 확인을 위한 더미(임시) 데이터입니다. 실제 뉴스 API/크롤러 연동 시
-  `modules/news_data.py`의 `get_dummy_news()` 반환값만 동일한 구조로 교체하면 됩니다.
+- 뉴스 자동 수집(`modules/news_crawler.py`)은 구글 뉴스 RSS 기사의 제목/요약만을 근거로 AI가
+  번역·요약한 결과입니다. 중요한 의사결정 전에는 반드시 원문 기사 링크를 통해 사실관계를
+  다시 확인해 주세요. 번역 결과는 비용 절감과 속도 향상을 위해 **12시간 동안 캐시**됩니다.
+- API 키가 없거나 수집/번역에 실패하면 `modules/news_data.py`의 더미 데이터로 자동 대체되므로,
+  뉴스 섹션이 비어 보이는 일은 없습니다.
