@@ -6,7 +6,7 @@
 # 전체 흐름 (아래로 갈수록 더 구체적인 작업입니다):
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 관련 기사 5개 주제를 수집
 #   2) 각 기사의 제목/요약(원문, 보통 영어 또는 터키어)을 정리
-#   3) OpenAI API(또는 Gemini API)를 이용해 한국어로 번역 + 3줄 요약
+#   3) Google Gemini API(google-generativeai)를 이용해 한국어로 번역 + 3줄 요약
 #   4) 결과를 Streamlit 캐시(@st.cache_data, 12시간)에 저장해서
 #      같은 12시간 안에는 API를 다시 호출하지 않도록 함 (비용 절감 + 속도 향상)
 #
@@ -19,25 +19,24 @@
 # -----------------------------------------------------------------------------
 # 🔑 API 키 설정 방법 (초보자를 위한 안내)
 # -----------------------------------------------------------------------------
-# 이 모듈은 아래 두 가지 방법 중 편한 방법으로 API 키를 읽어옵니다.
-# (둘 다 설정하지 않으면, AI 번역 기능은 자동으로 비활성화되고 더미 뉴스가 대신 표시됩니다.)
+# 이 모듈은 Google Gemini API 키(GEMINI_API_KEY)를 아래 두 가지 방법 중
+# 편한 방법으로 읽어옵니다.
+# (설정하지 않으면, AI 번역 기능은 자동으로 비활성화되고 더미 뉴스가 대신 표시됩니다.)
 #
-# [방법 1] .env 파일 사용 (로컬 개발 환경에 추천)
-#   1. 프로젝트 최상위 폴더(이 파일과 같은 위치의 상위 폴더)에 ".env" 파일을 만듭니다.
-#   2. 아래처럼 한 줄을 적어줍니다. (실제 발급받은 키로 교체)
-#        OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-#   3. ".env" 파일은 절대 GitHub 등에 올리면 안 되므로, .gitignore에 이미 등록해 두었습니다.
-#
-# [방법 2] Streamlit secrets.toml 사용 (Streamlit Community Cloud 배포 시 추천)
-#   1. 프로젝트의 ".streamlit/secrets.toml" 파일(.streamlit/secrets.toml.example 참고)에
-#      아래처럼 적어줍니다.
-#        OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-#   2. Streamlit Community Cloud에 배포할 때는 "App settings > Secrets" 메뉴에
+# [방법 1] Streamlit secrets.toml 사용 (배포 환경 추천, 권장)
+#   1. 프로젝트의 ".streamlit/secrets.toml" 파일에 아래처럼 적어줍니다.
+#        GEMINI_API_KEY = "your-gemini-api-key-here"
+#   2. 코드에서는 st.secrets["GEMINI_API_KEY"] 로 안전하게 읽어옵니다.
+#   3. Streamlit Community Cloud에 배포할 때는 "App settings > Secrets" 메뉴에
 #      동일한 내용을 붙여넣으면 됩니다.
 #
-# [선택] OpenAI 대신 Gemini를 사용하고 싶다면
-#   - AI_PROVIDER 값을 "gemini"로 설정하고, GEMINI_API_KEY를 위와 동일한 방식으로 설정하세요.
-#   - Gemini 사용 시에는 `pip install google-genai` 로 패키지를 추가 설치해야 합니다.
+# [방법 2] .env 파일 사용 (로컬 개발 환경용 보조)
+#   1. 프로젝트 최상위 폴더에 ".env" 파일을 만듭니다.
+#   2. 아래처럼 한 줄을 적어줍니다. (실제 발급받은 키로 교체)
+#        GEMINI_API_KEY=your-gemini-api-key-here
+#   3. ".env" 파일은 절대 GitHub 등에 올리면 안 되므로, .gitignore에 이미 등록해 두었습니다.
+#
+# Gemini API 키는 Google AI Studio(https://aistudio.google.com/apikey)에서 발급받을 수 있습니다.
 # =============================================================================
 
 import os
@@ -61,20 +60,13 @@ try:
 except ImportError:
     pass
 
-# openai 패키지 (OpenAI API 호출용). 설치되어 있지 않으면 None으로 두고,
-# 실제로 OpenAI를 사용하려고 할 때에만 에러 메시지를 보여줍니다.
+# google-generativeai 패키지 (Gemini API 호출용).
+# 설치되어 있지 않으면 None으로 두고, 실제로 번역을 시도할 때에만 에러 메시지를 보여줍니다.
+# 설치 방법: pip install google-generativeai
 try:
-    from openai import OpenAI
+    import google.generativeai as genai
 except ImportError:
-    OpenAI = None
-
-# google-genai 패키지 (Gemini API 호출용, 선택 사항).
-# AI_PROVIDER="gemini"로 설정했을 때만 필요하며, 기본값(OpenAI)만 쓴다면
-# 설치하지 않아도 전혀 문제가 없습니다.
-try:
-    from google import genai as google_genai
-except ImportError:
-    google_genai = None
+    genai = None
 
 
 # =============================================================================
@@ -265,24 +257,22 @@ def collect_all_raw_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
 
 
 # =============================================================================
-# 3. AI 번역/요약 (OpenAI API 기본, Gemini API 선택 가능)
+# 3. AI 번역/요약 (Google Gemini API — google-generativeai)
 # -----------------------------------------------------------------------------
-# 프롬프트(지시문)에는 "비즈니스 및 제조업 경영진이 읽기 편한 전문적이고
-# 명확한 어투로 번역할 것"이라는 요구사항을 반드시 포함시켰습니다.
+# 가성비와 속도가 좋은 gemini-1.5-flash 모델을 사용합니다.
+# System Instruction에는 "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인
+# 어투로 터키어/영어 뉴스를 한국어로 번역 및 요약"하도록 지시합니다.
 # =============================================================================
-OPENAI_MODEL_NAME = "gpt-4o-mini"  # 번역/요약처럼 비교적 단순한 작업에 적합한 저비용 모델
-GEMINI_MODEL_NAME = "gemini-2.0-flash"  # Gemini를 사용할 경우의 저비용/고속 모델
+GEMINI_MODEL_NAME = "gemini-1.5-flash"
 
-TRANSLATION_SYSTEM_PROMPT = """당신은 터키에 진출한 한국 기업의 경영진을 위해 현지 뉴스를 번역·요약하는
-전문 비즈니스 번역가입니다.
-
-아래 규칙을 반드시 지켜서 번역/요약해 주세요.
-1. 비즈니스 및 제조업 경영진이 읽기 편한, 전문적이고 명확한 어투로 번역할 것 (구어체, 과장된 표현 금지)
-2. 원문에 없는 내용을 추측해서 추가하지 말 것
-3. 응답은 반드시 아래 JSON 형식 그대로만 출력할 것 (그 외 설명 문장 금지)
-
-{"title_kr": "번역된 한국어 제목", "summary_kr": ["요약 문장1", "요약 문장2", "요약 문장3"]}
-"""
+# GenerativeModel의 system_instruction 으로 전달되는 지시문입니다.
+TRANSLATION_SYSTEM_PROMPT = (
+    "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인 어투로 "
+    "터키어/영어 뉴스를 한국어로 번역 및 요약해라. "
+    "구어체나 과장된 표현은 사용하지 말고, 원문에 없는 내용을 추측해서 추가하지 마세요. "
+    "응답은 반드시 아래 JSON 형식 그대로만 출력하세요. (그 외 설명 문장 금지)\n"
+    '{"title_kr": "번역된 한국어 제목", "summary_kr": ["요약 문장1", "요약 문장2", "요약 문장3"]}'
+)
 
 
 def _build_user_prompt(title_original: str, summary_original: str) -> str:
@@ -314,89 +304,70 @@ def _parse_translation_response(raw_text: str, fallback_title: str):
         return fallback_title, ["⚠️ AI 응답을 해석하지 못해 요약을 표시할 수 없습니다."]
 
 
-def _translate_with_openai(api_key: str, title_original: str, summary_original: str):
-    """OpenAI Chat Completions API를 호출해서 번역/요약 결과를 받아옵니다."""
-    if OpenAI is None:
-        raise RuntimeError(
-            "openai 패키지가 설치되어 있지 않습니다. `pip install openai` 명령으로 설치해 주세요."
-        )
-
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL_NAME,
-        messages=[
-            {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_prompt(title_original, summary_original)},
-        ],
-        # response_format을 JSON으로 강제하면 AI가 항상 정해진 형식으로만 답하도록 유도할 수 있습니다.
-        response_format={"type": "json_object"},
-        temperature=0.3,  # 낮을수록 더 일관되고 정확한(창의성이 낮은) 번역 결과를 얻습니다.
-    )
-    raw_text = response.choices[0].message.content
-    return _parse_translation_response(raw_text, fallback_title=title_original)
-
-
-def _translate_with_gemini(api_key: str, title_original: str, summary_original: str):
-    """Google Gemini API를 호출해서 번역/요약 결과를 받아옵니다. (OpenAI의 대안)"""
-    if google_genai is None:
-        raise RuntimeError(
-            "google-genai 패키지가 설치되어 있지 않습니다. `pip install google-genai` 명령으로 설치해 주세요."
-        )
-
-    client = google_genai.Client(api_key=api_key)
-    prompt = f"{TRANSLATION_SYSTEM_PROMPT}\n\n{_build_user_prompt(title_original, summary_original)}"
-    response = client.models.generate_content(model=GEMINI_MODEL_NAME, contents=prompt)
-
-    # Gemini는 JSON 강제 옵션 없이도 대체로 지시한 형식을 잘 따르지만,
-    # 혹시 앞뒤에 ```json ... ``` 같은 코드블록 표시가 붙어 나오는 경우를 대비해 제거해 줍니다.
-    raw_text = (response.text or "").strip()
-    raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
-    return _parse_translation_response(raw_text, fallback_title=title_original)
-
-
-def _get_ai_provider() -> str:
+def _get_gemini_api_key():
     """
-    사용할 AI 제공자를 결정합니다. ("openai" 또는 "gemini")
-    secrets.toml 또는 환경변수(.env)의 AI_PROVIDER 값을 읽고, 없으면 기본값인 "openai"를 사용합니다.
-    """
-    value = _read_config_value("AI_PROVIDER")
-    return (value or "openai").strip().lower()
+    Gemini API 키를 안전하게 읽어옵니다.
 
+    우선순위:
+      1) Streamlit secrets → st.secrets["GEMINI_API_KEY"]  (배포 환경 권장)
+      2) 환경변수 / .env 파일의 GEMINI_API_KEY             (로컬 개발용 보조)
 
-def _read_config_value(key: str):
-    """
-    Streamlit secrets.toml -> .env/환경변수 순서로 설정값을 찾아주는 공통 함수.
-    두 곳 모두에 없으면 None을 반환합니다.
+    secrets.toml 파일이 없거나 키가 없으면 None을 반환합니다.
     """
     try:
-        # secrets.toml 파일 자체가 없는 프로젝트에서는 st.secrets 접근 시 예외가 발생할 수 있으므로
-        # try-except로 감싸서 앱이 멈추지 않도록 합니다.
-        if key in st.secrets:
-            return st.secrets[key]
+        # st.secrets["GEMINI_API_KEY"] 형태로 안전하게 접근합니다.
+        # secrets.toml 자체가 없는 환경에서는 예외가 날 수 있으므로 try-except로 감쌉니다.
+        if "GEMINI_API_KEY" in st.secrets:
+            value = st.secrets["GEMINI_API_KEY"]
+            if value:
+                return str(value).strip()
     except Exception:
         pass
-    return os.getenv(key)
 
-
-def _get_api_key_for_provider(provider: str):
-    key_name = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
-    return _read_config_value(key_name)
+    env_value = os.getenv("GEMINI_API_KEY")
+    return env_value.strip() if env_value else None
 
 
 def is_ai_translation_configured() -> bool:
     """
     화면(app.py)에서 'AI 번역 기능을 쓸 수 있는지'를 미리 확인할 때 사용하는 함수입니다.
-    API 키가 설정되어 있지 않으면 False를 반환하고, app.py는 이때 더미 뉴스로 대체합니다.
+    GEMINI_API_KEY가 설정되어 있지 않으면 False를 반환하고,
+    app.py는 이때 더미 뉴스로 대체합니다.
     """
-    provider = _get_ai_provider()
-    return bool(_get_api_key_for_provider(provider))
+    return bool(_get_gemini_api_key())
 
 
-def _translate_and_summarize(provider: str, api_key: str, title_original: str, summary_original: str):
-    """provider 값에 따라 OpenAI 또는 Gemini 번역 함수를 호출하는 공통 진입점."""
-    if provider == "gemini":
-        return _translate_with_gemini(api_key, title_original, summary_original)
-    return _translate_with_openai(api_key, title_original, summary_original)
+def _translate_with_gemini(api_key: str, title_original: str, summary_original: str):
+    """
+    google-generativeai 패키지로 Gemini(gemini-1.5-flash) API를 호출해
+    뉴스 제목/요약을 한국어로 번역·요약합니다.
+    """
+    if genai is None:
+        raise RuntimeError(
+            "google-generativeai 패키지가 설치되어 있지 않습니다. "
+            "`pip install google-generativeai` 명령으로 설치해 주세요."
+        )
+
+    # API 키를 설정합니다. (호출마다 설정해도 무방하며, 키가 바뀌어도 안전하게 동작합니다.)
+    genai.configure(api_key=api_key)
+
+    # system_instruction에 번역 어투/형식 규칙을 넣고,
+    # 사용자 메시지에는 원문 제목/요약만 넣습니다.
+    model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL_NAME,
+        system_instruction=TRANSLATION_SYSTEM_PROMPT,
+        generation_config={
+            "temperature": 0.3,  # 낮을수록 더 일관되고 정확한(창의성이 낮은) 번역 결과를 얻습니다.
+            "response_mime_type": "application/json",  # JSON만 반환하도록 유도
+        },
+    )
+
+    response = model.generate_content(_build_user_prompt(title_original, summary_original))
+
+    # 응답 텍스트를 꺼냅니다. 혹시 ```json ... ``` 코드블록이 붙어 나오면 제거합니다.
+    raw_text = (getattr(response, "text", None) or "").strip()
+    raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+    return _parse_translation_response(raw_text, fallback_title=title_original)
 
 
 # =============================================================================
@@ -404,17 +375,17 @@ def _translate_and_summarize(provider: str, api_key: str, title_original: str, s
 # -----------------------------------------------------------------------------
 # @st.cache_data(ttl=43200)를 적용해서, 한 번 번역한 결과는 12시간 동안 그대로
 # 재사용합니다. 이렇게 하면
-#   1) 사용자가 새로고침할 때마다 매번 OpenAI/Gemini API를 호출하지 않아도 되어
+#   1) 사용자가 새로고침할 때마다 매번 Gemini API를 호출하지 않아도 되어
 #      "API 호출 비용"이 크게 절감되고,
 #   2) 이미 계산된 결과를 즉시 보여주므로 "대시보드 로딩 속도"도 빨라집니다.
 # =============================================================================
 @st.cache_data(
     ttl=CACHE_TTL_SECONDS,
-    show_spinner="최신 터키 뉴스를 수집하고 AI로 한국어 번역하는 중입니다... (최대 1분 정도 걸릴 수 있어요)",
+    show_spinner="최신 터키 뉴스를 수집하고 Gemini로 한국어 번역하는 중입니다... (최대 1분 정도 걸릴 수 있어요)",
 )
 def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
     """
-    5가지 주제에 대한 최신 터키 뉴스를 수집한 뒤, AI로 한국어 번역/요약까지
+    5가지 주제에 대한 최신 터키 뉴스를 수집한 뒤, Gemini API로 한국어 번역/요약까지
     완료한 결과를 리스트로 반환합니다.
 
     반환되는 각 뉴스 항목의 형태 (modules/news_data.py의 더미 데이터와 동일한 구조):
@@ -427,12 +398,10 @@ def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
             "date": "YYYY-MM-DD",
         }
 
-    API 키가 설정되어 있지 않거나, 기사 수집/번역에 실패하면 빈 리스트([])를
+    GEMINI_API_KEY가 설정되어 있지 않거나, 기사 수집/번역에 실패하면 빈 리스트([])를
     반환합니다. app.py에서는 빈 리스트가 반환되면 더미 뉴스를 대신 보여줍니다.
     """
-    provider = _get_ai_provider()
-    api_key = _get_api_key_for_provider(provider)
-
+    api_key = _get_gemini_api_key()
     if not api_key:
         return []
 
@@ -443,8 +412,8 @@ def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
     translated_news = []
     for raw in raw_news_list:
         try:
-            title_kr, summary_kr = _translate_and_summarize(
-                provider, api_key, raw["title_original"], raw["summary_original"]
+            title_kr, summary_kr = _translate_with_gemini(
+                api_key, raw["title_original"], raw["summary_original"]
             )
         except Exception:
             # 특정 기사 하나의 번역이 실패(API 오류, 요금 한도 초과 등)하더라도

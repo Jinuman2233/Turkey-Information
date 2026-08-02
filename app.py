@@ -494,7 +494,7 @@ st.divider()
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
 #      이민·비자, 노무·노동조합, 물류·인프라, 외투기업·제조업 규제)의
 #      최신 기사를 수집
-#   2) OpenAI API(또는 Gemini API)로 각 기사의 제목/요약을 한국어로 번역
+#   2) Google Gemini API(gemini-1.5-flash)로 각 기사의 제목/요약을 한국어로 번역
 #   3) 결과를 12시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
 #
 # API 키가 설정되어 있지 않거나(테스트 환경 등) 네트워크/번역에 실패하면,
@@ -529,10 +529,11 @@ if ai_ready:
         news_list = get_dummy_news()
         is_dummy_news = True
 else:
-    # OPENAI_API_KEY(또는 GEMINI_API_KEY)가 설정되어 있지 않은 경우
+    # GEMINI_API_KEY가 설정되어 있지 않은 경우
     st.info(
-        "💡 AI 번역 기능을 사용하려면 OpenAI(또는 Gemini) API 키를 설정해 주세요. "
-        "설정 전까지는 예시(더미) 뉴스를 표시합니다. (설정 방법은 README.md 참고)"
+        "💡 AI 번역 기능을 사용하려면 Gemini API 키(GEMINI_API_KEY)를 설정해 주세요. "
+        "설정 전까지는 예시(더미) 뉴스를 표시합니다. "
+        "(설정 방법: .streamlit/secrets.toml 또는 README.md 참고)"
     )
     news_list = get_dummy_news()
     is_dummy_news = True
