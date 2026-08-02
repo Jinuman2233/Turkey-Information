@@ -175,6 +175,29 @@ def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E",
     r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
     fill_color = f"rgba({r}, {g}, {b}, 0.15)"
 
+    # -------------------------------------------------------------------
+    # ⚠️ 중요: y축(세로축) 범위를 반드시 "실제 데이터의 최소~최대값" 기준으로
+    # 직접 지정해 줘야 합니다.
+    #
+    # 환율처럼 값 자체가 0에서 한참 떨어져 있는 데이터(예: 53.xx)에
+    # fill="tozeroy"(선 아래를 y=0까지 채우는 옵션)를 쓰면, Plotly가 그래프
+    # 범위를 자동으로 계산할 때 "0부터 최대값까지"로 잡아버립니다.
+    # 그러면 실제 등락 폭(예: 53.0~54.0)이 전체 범위(0~54)에 비해 너무 작아서
+    # 그래프가 맨 위에 거의 일직선으로 눌려 보이는 문제가 생깁니다.
+    # (바로 이 문제 때문에 환율 변동이 안 보이는 것처럼 보였던 것입니다.)
+    #
+    # 해결 방법: y축 범위를 [최솟값, 최댓값]에 위아래 여백(15%)을 더해서
+    # 명시적으로(autorange를 쓰지 않고) 지정해 줍니다.
+    # -------------------------------------------------------------------
+    y_min = float(history.min())
+    y_max = float(history.max())
+    if y_max > y_min:
+        padding = (y_max - y_min) * 0.15
+    else:
+        # 3개월 내내 값이 전혀 변하지 않은 경우(데이터가 1개뿐이거나 등락이 없는 경우)를 대비
+        padding = max(abs(y_max) * 0.01, 0.0001)
+    y_axis_range = [y_min - padding, y_max + padding]
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -192,7 +215,7 @@ def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E",
         height=height,
         showlegend=False,
         xaxis=dict(showgrid=False, visible=False),  # 카드가 복잡해 보이지 않도록 축은 숨김
-        yaxis=dict(showgrid=False, visible=False),
+        yaxis=dict(showgrid=False, visible=False, range=y_axis_range, autorange=False),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
     )
