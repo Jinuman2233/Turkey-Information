@@ -14,18 +14,21 @@
 #
 # 화면 구성 순서 (위 -> 아래):
 #   1) 상단: EUR/TRY, USD/TRY, TRY/KRW 환율 카드 (각 카드 아래 최근 3개월 추이 그래프 포함)
-#   2) 터키 기준금리 (최근 2년 월별 그래프)
-#   3) 터키 최저임금
+#   2) 터키 소비자물가지수(CPI) 3년 장기 추이 (FRED)
+#   3) 터키 기준금리 (최근 2년 월별 그래프)
+#   4) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
 #      - 시간당 최저임금 (Gross, 세전 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
-#   4) 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역, 실패 시 더미 데이터로 자동 대체)
+#   5) 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역, 실패 시 더미 데이터로 자동 대체)
 # =============================================================================
 
 import streamlit as st
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # 우리가 modules 폴더에 나누어 만든 함수들을 가져옵니다.
 from modules.fx_rates import get_all_fx_rates, get_fx_history, FX_TICKERS
+from modules.cpi_data import get_turkey_cpi_data
 from modules.policy_rate import get_policy_rate_dataframe, get_latest_policy_rate
 from modules.minimum_wage import (
     get_minimum_wage_info,
@@ -240,8 +243,8 @@ def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E",
 # =============================================================================
 st.title("🇹🇷 터키 비즈니스 & 경제 동향 대시보드")
 st.caption(
-    "환율 · 기준금리 · 최저임금 · 현지 뉴스를 한 화면에서 확인하세요. "
-    "(환율은 yfinance 실시간 데이터, 뉴스는 구글 뉴스 자동 수집 + AI 한국어 번역 데이터입니다.)"
+    "환율 · 소비자물가(CPI) · 기준금리 · 최저임금 · 현지 뉴스를 한 화면에서 확인하세요. "
+    "(환율은 yfinance, CPI는 FRED, 뉴스는 구글 뉴스 자동 수집 + AI 한국어 번역 데이터입니다.)"
 )
 
 st.divider()
@@ -327,7 +330,131 @@ st.divider()
 
 
 # =============================================================================
-# 3. 섹션 2 — 터키 기준금리 (최근 2년 월별 추이)
+# 3. 섹션 2 — 터키 소비자물가지수(CPI) 3년 장기 추이
+# -----------------------------------------------------------------------------
+# 환율 카드 바로 아래, 기준금리 섹션 바로 위에 배치합니다.
+# modules/cpi_data.py 에서 FRED(TURCPIALLMINMEI) CPI 지수를 가져와
+# YoY / MoM 상승률을 계산합니다. API 실패 시 더미 데이터로 대체됩니다.
+# =============================================================================
+render_section_title("📈 터키 소비자물가지수 (CPI) 3년 장기 추이")
+
+with st.spinner("터키 CPI 데이터를 불러오는 중입니다..."):
+    cpi_data = get_turkey_cpi_data()
+
+cpi_df = cpi_data["df"]
+latest_yoy = cpi_data["latest_yoy"]
+latest_mom = cpi_data["latest_mom"]
+yoy_change = cpi_data["yoy_change"]
+latest_cpi_month = cpi_data["latest_month"]
+
+if cpi_df is None or cpi_df.empty or latest_yoy is None:
+    st.warning("⚠️ 터키 CPI 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+else:
+    # 3-1) 핵심 지표 카드 3열: YoY / MoM / YoY 변동폭(%p)
+    yoy_col, mom_col, chg_col = st.columns(3)
+
+    with yoy_col:
+        st.metric(
+            label="전년 동기 대비 (YoY)",
+            value=f"{latest_yoy:.2f}%",
+            delta=f"{yoy_change:+.2f}%p 전월비",
+            delta_color="inverse",  # 물가는 상승이 부담 → 상승을 붉게
+            help="가장 최근 달의 전년 동기 대비 소비자물가 상승률입니다.",
+        )
+
+    with mom_col:
+        st.metric(
+            label="전월 대비 (MoM)",
+            value=f"{latest_mom:.2f}%",
+            help="가장 최근 달의 전월 대비 소비자물가 상승률입니다.",
+        )
+
+    with chg_col:
+        # YoY 변동폭이 음수면 상승세 둔화, 양수면 가속
+        if yoy_change < 0:
+            trend_label = "상승세 둔화"
+        elif yoy_change > 0:
+            trend_label = "상승세 가속"
+        else:
+            trend_label = "전월과 동일"
+        st.metric(
+            label="YoY 변동폭 (전월 대비)",
+            value=f"{yoy_change:+.2f}%p",
+            delta=trend_label,
+            delta_color="off",
+            help="전월 대비 연간 물가상승률(YoY)이 얼마나 변했는지(%p)입니다.",
+        )
+
+    st.caption(f"기준월: {latest_cpi_month}")
+
+    # 3-2) 복합 차트: YoY 꺾은선(주축) + MoM 막대(보조축)
+    fig_cpi = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # 배경 막대: 월간 물가상승률(MoM %) — 연한 색으로 보조 정보
+    fig_cpi.add_trace(
+        go.Bar(
+            x=cpi_df["날짜"],
+            y=cpi_df["MoM(%)"],
+            customdata=cpi_df[["YoY(%)", "MoM(%)"]],
+            name="MoM (%)",
+            marker=dict(color="rgba(21, 101, 192, 0.28)"),
+            hovertemplate=(
+                "%{x|%Y-%m}<br>"
+                "YoY: %{customdata[0]:.2f}%<br>"
+                "MoM: %{customdata[1]:.2f}%<extra></extra>"
+            ),
+        ),
+        secondary_y=True,
+    )
+
+    # 전경 꺾은선: 연간 물가상승률(YoY %) — 굵고 명확하게
+    fig_cpi.add_trace(
+        go.Scatter(
+            x=cpi_df["날짜"],
+            y=cpi_df["YoY(%)"],
+            customdata=cpi_df[["YoY(%)", "MoM(%)"]],
+            mode="lines+markers",
+            name="YoY (%)",
+            line=dict(color="#C8102E", width=3.5),
+            marker=dict(size=5, color="#C8102E"),
+            hovertemplate=(
+                "%{x|%Y-%m}<br>"
+                "YoY: %{customdata[0]:.2f}%<br>"
+                "MoM: %{customdata[1]:.2f}%<extra></extra>"
+            ),
+        ),
+        secondary_y=False,
+    )
+
+    fig_cpi.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=360,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="x unified",
+        autosize=True,
+        barmode="relative",
+    )
+    fig_cpi.update_xaxes(title_text=None, tickformat="%Y-%m")
+    fig_cpi.update_yaxes(title_text="연간 물가상승률 YoY (%)", secondary_y=False)
+    fig_cpi.update_yaxes(title_text="월간 물가상승률 MoM (%)", secondary_y=True, showgrid=False)
+
+    st.plotly_chart(fig_cpi, width="stretch", config={"displayModeBar": False})
+
+    if cpi_data.get("is_dummy"):
+        st.caption(
+            "⚠️ 현재 표시 중인 CPI는 API 호출 실패로 인한 참고용 더미 데이터입니다. "
+            "(대략적인 최근 3년 터키 물가 추이 수준을 반영)"
+        )
+    else:
+        st.caption(
+            "데이터 출처: FRED · TURCPIALLMINMEI (OECD MEI Turkey CPI) · 하루 1회 자동 갱신"
+        )
+
+st.divider()
+
+
+# =============================================================================
+# 4. 섹션 3 — 터키 기준금리 (최근 2년 월별 추이)
 # -----------------------------------------------------------------------------
 # modules/policy_rate.py 에서 만들어 둔 데이터를 그래프로 표현합니다.
 # Plotly 라이브러리를 사용하면 마우스를 올렸을 때 값이 보이는(hover) 등
@@ -387,13 +514,13 @@ st.divider()
 
 
 # =============================================================================
-# 4. 섹션 3 — 터키 최저임금 + 환율 환산
+# 5. 섹션 4 — 터키 최저임금 + 환율 환산
 # -----------------------------------------------------------------------------
 # modules/minimum_wage.py 에서 정의한 최저임금(TRY)을 위에서 이미 가져온
 # 환율 데이터(fx_rates)를 이용해 EUR / USD / KRW로 환산해서 함께 보여줍니다.
 #
-# 4-1) 월 최저임금 : Gross(세전) 기준으로 표시
-# 4-2) 시간당 최저임금 : Gross(세전) 기준으로 표시 (월 근무시간 255시간 기준)
+# 5-1) 월 최저임금 : Gross(세전) 기준으로 표시
+# 5-2) 시간당 최저임금 : Gross(세전) 기준으로 표시 (월 근무시간 255시간 기준)
 # =============================================================================
 render_section_title("💰 터키 최저임금 (Gross, 세전 기준)")
 
@@ -494,7 +621,7 @@ st.divider()
 
 
 # =============================================================================
-# 5. 섹션 4 — 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역)
+# 6. 섹션 5 — 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역)
 # -----------------------------------------------------------------------------
 # modules/news_crawler.py 에서 다음과 같은 순서로 뉴스를 준비해 옵니다.
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
