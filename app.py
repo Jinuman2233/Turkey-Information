@@ -494,8 +494,8 @@ st.divider()
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
 #      이민·비자, 노무·노동조합, 물류·인프라, 외투기업·제조업 규제)의
 #      최신 기사를 수집
-#   2) Google Gemini API(gemini-1.5-flash)로 각 기사의 제목/요약을 한국어로 번역
-#   3) 결과를 12시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
+#   2) Google Gemini API(gemini-1.5-flash)로 기사들을 배치(1~2회) 번역
+#   3) 결과를 6시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
 #
 # API 키가 설정되어 있지 않거나(테스트 환경 등) 네트워크/번역에 실패하면,
 # modules/news_data.py 의 더미 데이터로 자동 대체(fallback)해서 화면이
@@ -514,9 +514,17 @@ render_section_title("📰 실시간 터키 뉴스 (AI 한국어 번역)")
 ai_ready = is_ai_translation_configured()
 
 if ai_ready:
-    # fetch_ai_translated_news()는 성공한 결과만 12시간 캐시합니다.
-    # 실패 원인은 error 메시지로 돌려주어, 사용자가 바로 조치할 수 있게 합니다.
-    news_result = fetch_ai_translated_news()
+    # fetch_ai_translated_news()는 성공한 결과만 6시간 캐시합니다.
+    # 실패해도 화면이 멈추지 않도록 error 메시지만 받아 안내합니다.
+    try:
+        news_result = fetch_ai_translated_news()
+    except Exception:
+        # 예외가 밖으로 새어 나와도 대시보드 전체가 죽지 않도록 최종 방어선
+        news_result = {
+            "news": [],
+            "error": "현재 API 처리 지연 중입니다. 1분 후 새로고침 해주세요",
+        }
+
     news_list = news_result.get("news") or []
     news_error = news_result.get("error")
 
@@ -524,16 +532,21 @@ if ai_ready:
         is_dummy_news = False
     else:
         # API 키는 설정돼 있지만 수집/번역에 실패한 경우
-        st.warning(
-            "⚠️ 실시간 뉴스를 가져오지 못했습니다. 우선 예시 데이터를 표시합니다.\n\n"
-            f"**원인:** {news_error or '알 수 없는 오류'}\n\n"
-            "**확인 체크리스트**\n"
-            "1. Streamlit Cloud → **App settings → Secrets** 에 아래가 있는지 확인\n"
-            '   `GEMINI_API_KEY = "AIza...실제키"`  (예시 값 your-gemini-api-key-here 이면 안 됨)\n'
-            "2. Secrets 저장 후 앱 메뉴에서 **Reboot** 실행\n"
-            "3. Google AI Studio(https://aistudio.google.com/apikey)에서 키가 유효한지 확인\n"
-            "4. 배포 후 `google-generativeai` 패키지가 설치되도록 requirements.txt가 main에 반영됐는지 확인"
-        )
+        rate_limit_msg = "현재 API 처리 지연 중입니다. 1분 후 새로고침 해주세요"
+        if news_error and rate_limit_msg in str(news_error):
+            # 429 / Quota Exceeded — 요청하신 안내 문구를 그대로 보여줍니다.
+            st.warning(f"⚠️ {rate_limit_msg}")
+        else:
+            st.warning(
+                "⚠️ 실시간 뉴스를 가져오지 못했습니다. 우선 예시 데이터를 표시합니다.\n\n"
+                f"**원인:** {news_error or '알 수 없는 오류'}\n\n"
+                "**확인 체크리스트**\n"
+                "1. Streamlit Cloud → **App settings → Secrets** 에 아래가 있는지 확인\n"
+                '   `GEMINI_API_KEY = "AIza...실제키"`  (예시 값 your-gemini-api-key-here 이면 안 됨)\n'
+                "2. Secrets 저장 후 앱 메뉴에서 **Reboot** 실행\n"
+                "3. Google AI Studio(https://aistudio.google.com/apikey)에서 키가 유효한지 확인\n"
+                "4. 배포 후 `google-generativeai` 패키지가 설치되도록 requirements.txt가 main에 반영됐는지 확인"
+            )
         news_list = get_dummy_news()
         is_dummy_news = True
 else:
@@ -573,7 +586,7 @@ for news in news_list:
 if is_dummy_news:
     st.caption("⚠️ 현재 표시 중인 뉴스는 레이아웃 확인용 예시(더미) 데이터입니다.")
 else:
-    st.caption("데이터 출처: Google News RSS + AI 번역 · 12시간마다 자동 갱신")
+    st.caption("데이터 출처: Google News RSS + Gemini 배치 번역 · 6시간마다 자동 갱신")
 
 st.divider()
 
