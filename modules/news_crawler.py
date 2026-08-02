@@ -7,8 +7,9 @@
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 관련 기사 5개 주제를 수집
 #   2) 각 기사의 제목/요약(원문, 보통 영어 또는 터키어)을 정리
 #   3) Google Gemini API(google-generativeai)를 이용해 한국어로 번역 + 3줄 요약
-#   4) 결과를 Streamlit 캐시(@st.cache_data, 12시간)에 저장해서
-#      같은 12시간 안에는 API를 다시 호출하지 않도록 함 (비용 절감 + 속도 향상)
+#   4) 결과를 Streamlit 캐시(@st.cache_data, 6시간)에 저장해서
+#      같은 6시간 안에는 API를 다시 호출하지 않도록 함 (비용 절감 + 속도 향상)
+#      ※ 번역은 기사별 호출이 아니라 배치 1~2회로 묶어 429(RPM 제한)를 피합니다.
 #
 # ⚠️ 이 모듈은 modules/news_data.py(더미 뉴스)를 대체하는 것이 아니라,
 #    "새로운 실데이터 소스"로 추가된 것입니다. app.py에서는 이 모듈이
@@ -42,6 +43,7 @@
 import os
 import re
 import json
+import time
 import html as html_module
 from datetime import datetime
 from html.parser import HTMLParser
@@ -106,7 +108,11 @@ NEWS_TOPICS = [
 
 # 한 번에 캐시가 갱신될 때 API 호출 비용을 통제하기 위한 기본값들입니다.
 DEFAULT_MAX_ARTICLES_PER_TOPIC = 1  # 주제(5개)당 몇 개의 기사를 가져올지 (5개 주제 x 1개 = 총 5개 기사)
-CACHE_TTL_SECONDS = 60 * 60 * 12  # 12시간 (문제에서 요구한 캐시 유효시간)
+CACHE_TTL_SECONDS = 60 * 60 * 6  # 6시간 (새로고침할 때마다 API를 다시 치지 않도록 캐시 유지)
+BATCH_API_SLEEP_SECONDS = 4  # 배치를 2번 이상 나눠 호출할 때, 호출 사이 대기 시간(초)
+# Gemini 무료 티어는 대략 분당 15회(15 RPM) 제한이 있어, 기사마다 개별 호출하면
+# 쉽게 429(Quota Exceeded)가 납니다. 그래서 번역은 배치로 1~2회만 호출합니다.
+API_RATE_LIMIT_MESSAGE = "현재 API 처리 지연 중입니다. 1분 후 새로고침 해주세요"
 
 
 # =============================================================================
@@ -285,49 +291,121 @@ _PLACEHOLDER_API_KEYS = {
 }
 
 # GenerativeModel의 system_instruction 으로 전달되는 지시문입니다.
+# 배치 번역이므로, 여러 기사를 한 번에 받아 JSON 배열로 돌려주도록 지시합니다.
 TRANSLATION_SYSTEM_PROMPT = (
     "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인 어투로 "
     "터키어/영어 뉴스를 한국어로 번역 및 요약해라. "
     "구어체나 과장된 표현은 사용하지 말고, 원문에 없는 내용을 추측해서 추가하지 마세요. "
+    "입력으로 여러 기사가 주어지면 각 기사를 모두 번역/요약하고, "
     "응답은 반드시 아래 JSON 형식 그대로만 출력하세요. (그 외 설명 문장 금지)\n"
-    '{"title_kr": "번역된 한국어 제목", "summary_kr": ["요약 문장1", "요약 문장2", "요약 문장3"]}'
+    '{"articles":[{"id":0,"title_kr":"번역된 한국어 제목","summary_kr":["요약1","요약2","요약3"]}]}'
 )
 
 
 class NewsFetchError(RuntimeError):
-    """뉴스 수집/번역 실패 시, Streamlit 캐시에 실패 결과가 12시간 동안
+    """뉴스 수집/번역 실패 시, Streamlit 캐시에 실패 결과가 오래
     남지 않도록 예외로 올리는 데 사용하는 내부 예외 클래스입니다."""
 
     pass
 
 
-def _build_user_prompt(title_original: str, summary_original: str) -> str:
+class GeminiRateLimitError(NewsFetchError):
+    """Gemini 429 / Quota Exceeded 전용 예외."""
+
+    pass
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """예외 메시지가 429 / quota / rate limit 인지 판별합니다."""
+    text = str(exc).lower()
     return (
-        f"[원문 제목]\n{title_original}\n\n"
-        f"[원문 요약/본문]\n{summary_original or '(제공된 요약이 없어 제목만으로 판단해야 합니다)'}\n\n"
-        "위 뉴스 기사를 한국어로 번역하고, 핵심 내용을 정확히 3줄로 요약해 주세요."
+        "429" in text
+        or "quota" in text
+        or "rate limit" in text
+        or "rate_limit" in text
+        or "resource exhausted" in text
+        or "too many requests" in text
     )
 
 
-def _parse_translation_response(raw_text: str, fallback_title: str):
+def _build_batch_user_prompt(raw_news_batch: list) -> str:
     """
-    AI가 돌려준 텍스트(JSON 형식)를 파싱합니다.
-    혹시 JSON 형식이 아니거나 파싱에 실패하면, 원문 제목과 안내 문구로
-    안전하게 대체(fallback)해서 화면이 깨지지 않도록 합니다.
+    여러 기사(제목/요약)를 하나의 JSON 배열로 묶어 Gemini에 보낼 프롬프트를 만듭니다.
+    이렇게 하면 기사 수와 관계없이 API를 1번만 호출할 수 있습니다.
     """
-    try:
-        data = json.loads(raw_text)
-        title_kr = str(data.get("title_kr") or fallback_title).strip()
-        summary_kr = data.get("summary_kr")
-        if not isinstance(summary_kr, list) or len(summary_kr) == 0:
-            summary_kr = [str(summary_kr or "요약 내용을 생성하지 못했습니다.")]
-        # 3줄을 넘으면 앞의 3개만 사용하고, 3줄이 안 되면 있는 만큼만 사용합니다.
-        summary_kr = [str(line).strip() for line in summary_kr[:3] if str(line).strip()]
-        if not summary_kr:
-            summary_kr = ["요약 내용을 생성하지 못했습니다."]
-        return title_kr, summary_kr
-    except Exception:
-        return fallback_title, ["⚠️ AI 응답을 해석하지 못해 요약을 표시할 수 없습니다."]
+    payload = []
+    for idx, item in enumerate(raw_news_batch):
+        payload.append(
+            {
+                "id": idx,
+                "title": item.get("title_original", ""),
+                "summary": item.get("summary_original", "")
+                or "(제공된 요약이 없어 제목만으로 판단해야 합니다)",
+            }
+        )
+
+    return (
+        "아래 JSON 배열의 각 뉴스 기사를 한국어로 번역하고, 핵심 내용을 정확히 3줄로 요약해 주세요.\n"
+        "입력 id 값을 그대로 응답 articles[].id 에 넣어 주세요.\n\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _normalize_summary_lines(summary_kr, fallback_line: str = "요약 내용을 생성하지 못했습니다.") -> list:
+    """summary_kr 값을 항상 '최대 3개 문자열 리스트'로 정규화합니다."""
+    if not isinstance(summary_kr, list) or len(summary_kr) == 0:
+        summary_kr = [str(summary_kr or fallback_line)]
+    summary_kr = [str(line).strip() for line in summary_kr[:3] if str(line).strip()]
+    if not summary_kr:
+        summary_kr = [fallback_line]
+    return summary_kr
+
+
+def _parse_batch_translation_response(raw_text: str, raw_news_batch: list) -> list:
+    """
+    배치 번역 응답(JSON)을 파싱해, 입력 기사 순서에 맞는
+    [{title_kr, summary_kr}, ...] 리스트로 변환합니다.
+    """
+    cleaned = re.sub(r"^```(json)?|```$", "", (raw_text or "").strip(), flags=re.MULTILINE).strip()
+    data = json.loads(cleaned)
+
+    # 응답이 {"articles":[...]} 또는 그냥 [...] 둘 다 허용
+    if isinstance(data, dict):
+        articles = data.get("articles")
+    else:
+        articles = data
+
+    if not isinstance(articles, list) or not articles:
+        raise ValueError("배치 번역 응답에 articles 배열이 없습니다.")
+
+    # id -> 번역 결과 매핑
+    by_id = {}
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        try:
+            article_id = int(article.get("id"))
+        except (TypeError, ValueError):
+            continue
+        title_kr = str(article.get("title_kr") or "").strip()
+        summary_kr = _normalize_summary_lines(article.get("summary_kr"))
+        if title_kr:
+            by_id[article_id] = {"title_kr": title_kr, "summary_kr": summary_kr}
+
+    results = []
+    for idx, raw in enumerate(raw_news_batch):
+        translated = by_id.get(idx)
+        if translated:
+            results.append(translated)
+        else:
+            # 일부 기사만 빠진 경우에도 화면이 비지 않도록 최소한의 fallback을 넣습니다.
+            results.append(
+                {
+                    "title_kr": raw.get("title_original") or f"기사 {idx + 1}",
+                    "summary_kr": ["이 기사의 번역 결과를 받지 못했습니다."],
+                }
+            )
+    return results
 
 
 def _normalize_api_key(raw_value) -> str | None:
@@ -395,13 +473,11 @@ def _extract_response_text(response) -> str:
     return ""
 
 
-def _translate_with_gemini(api_key: str, title_original: str, summary_original: str):
+def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     """
-    google-generativeai 패키지로 Gemini API를 호출해
-    뉴스 제목/요약을 한국어로 번역·요약합니다.
-
-    일부 계정/지역에서는 특정 모델 ID가 없거나 이름이 다를 수 있어,
-    GEMINI_MODEL_CANDIDATES 목록을 순서대로 시도합니다.
+    Gemini API를 1회 호출해 텍스트 응답을 반환합니다.
+    모델 후보를 순서대로 시도하되, 429(쿼터 초과)가 나면 즉시 중단합니다.
+    (모델 폴백을 계속하면 RPM을 더 소모해 상황이 악화됩니다.)
     """
     if genai is None:
         raise RuntimeError(
@@ -409,46 +485,77 @@ def _translate_with_gemini(api_key: str, title_original: str, summary_original: 
             "requirements.txt에 google-generativeai가 있는지 확인하고 앱을 Reboot 해 주세요."
         )
 
-    # API 키를 설정합니다. (호출마다 설정해도 무방하며, 키가 바뀌어도 안전하게 동작합니다.)
     genai.configure(api_key=api_key)
-
-    user_prompt = _build_user_prompt(title_original, summary_original)
     last_error = None
 
     for model_name in GEMINI_MODEL_CANDIDATES:
         try:
-            # system_instruction에 번역 어투/형식 규칙을 넣고,
-            # 사용자 메시지에는 원문 제목/요약만 넣습니다.
             model = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=TRANSLATION_SYSTEM_PROMPT,
                 generation_config={
-                    "temperature": 0.3,  # 낮을수록 더 일관되고 정확한 번역 결과를 얻습니다.
-                    "response_mime_type": "application/json",  # JSON만 반환하도록 유도
+                    "temperature": 0.3,
+                    "response_mime_type": "application/json",
                 },
             )
             response = model.generate_content(user_prompt)
             raw_text = _extract_response_text(response)
             if not raw_text:
                 raise RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
-
-            # 혹시 ```json ... ``` 코드블록이 붙어 나오면 제거합니다.
-            raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
-            return _parse_translation_response(raw_text, fallback_title=title_original)
+            return raw_text
         except Exception as exc:
+            if _is_rate_limit_error(exc):
+                raise GeminiRateLimitError(API_RATE_LIMIT_MESSAGE) from exc
             last_error = exc
-            # 다음 후보 모델로 이어서 시도합니다.
+            # 모델이 없거나 일시 오류인 경우에만 다음 후보로 넘어갑니다.
             continue
 
     raise RuntimeError(f"Gemini 번역 호출 실패: {last_error}")
 
 
+def _translate_news_batch_with_gemini(api_key: str, raw_news_list: list) -> list:
+    """
+    여러 기사를 한 번에(배치로) 번역합니다.
+
+    - 기본: 전체 기사를 묶어 API를 딱 1번만 호출
+    - 기사가 많아 응답이 잘릴 가능성에 대비해, 필요하면 최대 2개 배치로 나눕니다.
+      (2번째 배치 호출 전에는 time.sleep(4)로 RPM 제한을 피합니다.)
+    """
+    if not raw_news_list:
+        return []
+
+    # 보통 5개 전후라 1번 호출로 충분합니다. 8개 초과일 때만 2배치로 나눕니다.
+    if len(raw_news_list) <= 8:
+        batches = [raw_news_list]
+    else:
+        mid = (len(raw_news_list) + 1) // 2
+        batches = [raw_news_list[:mid], raw_news_list[mid:]]
+
+    all_translated = []
+    for batch_index, batch in enumerate(batches):
+        if batch_index > 0:
+            # 배치를 2번 호출해야 할 때만, 무료 티어 15 RPM을 넘지 않도록 대기합니다.
+            time.sleep(BATCH_API_SLEEP_SECONDS)
+
+        raw_text = _call_gemini_once(api_key, _build_batch_user_prompt(batch))
+        batch_translated = _parse_batch_translation_response(raw_text, batch)
+        all_translated.extend(batch_translated)
+
+    return all_translated
+
+
 def _humanize_gemini_error(exc: Exception) -> str:
     """Gemini/네트워크 예외 메시지를 사용자가 조치하기 쉬운 안내로 바꿉니다."""
+    if isinstance(exc, GeminiRateLimitError) or _is_rate_limit_error(exc):
+        return API_RATE_LIMIT_MESSAGE
+
     text = str(exc)
     lowered = text.lower()
 
-    if "api key" in lowered or "api_key" in lowered or "invalid" in lowered and "key" in lowered:
+    if API_RATE_LIMIT_MESSAGE in text:
+        return API_RATE_LIMIT_MESSAGE
+
+    if "api key" in lowered or "api_key" in lowered or ("invalid" in lowered and "key" in lowered):
         return (
             "Gemini API 키가 올바르지 않습니다. "
             "Streamlit Cloud → App settings → Secrets 에 "
@@ -459,8 +566,6 @@ def _humanize_gemini_error(exc: Exception) -> str:
             "Gemini API 권한 오류(403)입니다. "
             "Google AI Studio에서 키를 다시 발급받고, Generative Language API 사용이 가능한지 확인해 주세요."
         )
-    if "quota" in lowered or "429" in lowered or "rate" in lowered:
-        return "Gemini API 사용량 한도(쿼터)를 초과했습니다. 잠시 후 다시 시도해 주세요."
     if "not found" in lowered and "model" in lowered:
         return (
             f"요청한 Gemini 모델을 찾을 수 없습니다. ({text}) "
@@ -474,67 +579,72 @@ def _humanize_gemini_error(exc: Exception) -> str:
 # =============================================================================
 # 4. 최종 공개 함수 — app.py에서는 fetch_ai_translated_news()를 호출하면 됩니다.
 # -----------------------------------------------------------------------------
-# 성공한 번역 결과만 12시간 캐시합니다.
-# 실패 결과는 예외로 올려서 Streamlit 캐시에 12시간 동안 남지 않게 합니다.
-# (키가 잘못됐거나 패키지 설치 전 실패가 캐시에 고착되는 문제를 방지)
+# 성공한 번역 결과만 @st.cache_data(ttl=21600, 6시간)으로 캐시합니다.
+# 실패 결과는 예외로 올려서 캐시에 고착되지 않게 합니다.
+# 번역은 기사별 개별 호출이 아니라 배치 1~2회로 RPM 제한을 피합니다.
 # =============================================================================
 @st.cache_data(
-    ttl=CACHE_TTL_SECONDS,
-    show_spinner="최신 터키 뉴스를 수집하고 Gemini로 한국어 번역하는 중입니다... (최대 1분 정도 걸릴 수 있어요)",
+    ttl=CACHE_TTL_SECONDS,  # 6시간 = 21600초
+    show_spinner="최신 터키 뉴스를 수집하고 Gemini로 한 번에 번역하는 중입니다...",
 )
 def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
     """성공한 뉴스 리스트만 캐시합니다. 실패 시 NewsFetchError를 발생시킵니다."""
-    if genai is None:
-        raise NewsFetchError(
-            "google-generativeai 패키지가 설치되어 있지 않습니다. "
-            "requirements.txt 반영 후 Streamlit Cloud에서 앱을 Reboot 해 주세요."
-        )
-
-    api_key = _get_gemini_api_key()
-    if not api_key:
-        raise NewsFetchError(
-            "GEMINI_API_KEY가 설정되지 않았거나 예시 값(your-gemini-api-key-here) 그대로입니다."
-        )
-
-    raw_news_list = collect_all_raw_news(max_per_topic=max_per_topic)
-    if not raw_news_list:
-        raise NewsFetchError(
-            "구글 뉴스 RSS에서 기사를 가져오지 못했습니다. "
-            "네트워크/방화벽 문제이거나 Google News RSS 접근이 차단되었을 수 있습니다."
-        )
-
-    translated_news = []
-    last_error = None
-    for raw in raw_news_list:
-        try:
-            title_kr, summary_kr = _translate_with_gemini(
-                api_key, raw["title_original"], raw["summary_original"]
+    try:
+        if genai is None:
+            raise NewsFetchError(
+                "google-generativeai 패키지가 설치되어 있지 않습니다. "
+                "requirements.txt 반영 후 Streamlit Cloud에서 앱을 Reboot 해 주세요."
             )
-        except Exception as exc:
-            last_error = exc
-            # 특정 기사 하나의 번역이 실패하더라도 나머지는 계속 시도합니다.
-            continue
 
-        translated_news.append(
-            {
-                "category": raw["category"],
-                "title_kr": title_kr,
-                "summary_kr": summary_kr,
-                "link": raw["link"],
-                "source": raw["source"],
-                "date": raw["date"],
-            }
-        )
+        api_key = _get_gemini_api_key()
+        if not api_key:
+            raise NewsFetchError(
+                "GEMINI_API_KEY가 설정되지 않았거나 예시 값(your-gemini-api-key-here) 그대로입니다."
+            )
 
-    if not translated_news:
-        raise NewsFetchError(_humanize_gemini_error(last_error or RuntimeError("알 수 없는 번역 오류")))
+        raw_news_list = collect_all_raw_news(max_per_topic=max_per_topic)
+        if not raw_news_list:
+            raise NewsFetchError(
+                "구글 뉴스 RSS에서 기사를 가져오지 못했습니다. "
+                "네트워크/방화벽 문제이거나 Google News RSS 접근이 차단되었을 수 있습니다."
+            )
 
-    return translated_news
+        # ★ 핵심: 기사마다 for-loop로 API를 치지 않고, 전체를 배치로 1~2번만 번역합니다.
+        translated_parts = _translate_news_batch_with_gemini(api_key, raw_news_list)
+
+        translated_news = []
+        for raw, translated in zip(raw_news_list, translated_parts):
+            translated_news.append(
+                {
+                    "category": raw["category"],
+                    "title_kr": translated["title_kr"],
+                    "summary_kr": translated["summary_kr"],
+                    "link": raw["link"],
+                    "source": raw["source"],
+                    "date": raw["date"],
+                }
+            )
+
+        if not translated_news:
+            raise NewsFetchError("번역된 뉴스 결과가 비어 있습니다.")
+
+        return translated_news
+    except GeminiRateLimitError:
+        # 429는 그대로 올려서 화면에서 안내 메시지를 보여줍니다.
+        raise
+    except NewsFetchError:
+        raise
+    except Exception as exc:
+        # 예기치 못한 예외도 앱이 멈추지 않도록 NewsFetchError로 감쌉니다.
+        if _is_rate_limit_error(exc):
+            raise GeminiRateLimitError(API_RATE_LIMIT_MESSAGE) from exc
+        raise NewsFetchError(_humanize_gemini_error(exc)) from exc
 
 
 def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC) -> dict:
     """
     app.py에서 사용하는 공개 함수입니다.
+    예외가 나더라도 화면이 멈추지 않도록 항상 dict를 반환합니다.
 
     Returns
     -------
@@ -547,6 +657,8 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
     try:
         news = _cached_ai_translated_news(max_per_topic=max_per_topic)
         return {"news": news, "error": None}
+    except GeminiRateLimitError:
+        return {"news": [], "error": API_RATE_LIMIT_MESSAGE}
     except NewsFetchError as exc:
         return {"news": [], "error": str(exc)}
     except Exception as exc:
