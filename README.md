@@ -13,7 +13,7 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
    - 시간당 최저임금(**Gross, 세전 기준**, 월 근무시간 255시간 가정)과 EUR / USD / KRW 환산 금액
 4. **실시간 터키 뉴스 + AI 한국어 번역** — 무역·관세 / 이민·비자 / 노무·노동조합 / 물류·인프라 /
    외투기업·제조업 규제, 5가지 주제의 최신 뉴스를 구글 뉴스(Google News RSS)에서 자동 수집하고,
-   OpenAI(또는 Gemini) API로 한국어 번역·요약까지 자동으로 처리합니다.
+   **Google Gemini API(`gemini-1.5-flash`)** 로 한국어 번역·요약까지 자동으로 처리합니다.
    - 메인 화면에는 번역된 **한국어 제목만** 깔끔한 리스트로 표시됩니다.
    - 제목을 클릭(`st.expander`)하면 한국어 3줄 요약과 **원문 기사 링크**(새 창으로 열림)가 펼쳐집니다.
    - API 키가 없거나 수집/번역에 실패하면, 레이아웃 확인용 예시(더미) 뉴스로 자동 대체됩니다.
@@ -28,7 +28,7 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 │   ├── policy_rate.py           # 터키 기준금리 월별 데이터
 │   ├── minimum_wage.py          # 터키 최저임금 데이터 및 환율 환산
 │   ├── news_data.py             # 뉴스 더미(예시) 데이터 — 실시간 수집 실패 시 대체용
-│   └── news_crawler.py          # 구글 뉴스 RSS 자동 수집 + AI(OpenAI/Gemini) 한국어 번역
+│   └── news_crawler.py          # 구글 뉴스 RSS 자동 수집 + Gemini(gemini-1.5-flash) 한국어 번역
 ├── .streamlit/
 │   ├── config.toml              # 테마/서버 설정
 │   └── secrets.toml.example     # API 키 설정 예시 (실제 secrets.toml은 Git에 올리지 않음)
@@ -55,24 +55,15 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 
 4. 브라우저에서 `http://localhost:8501` 접속 (스마트폰에서 보려면 같은 네트워크에서 `Network URL`로 접속)
 
-## 🔑 AI 뉴스 번역 기능 설정
+## 🔑 AI 뉴스 번역 기능 설정 (Google Gemini)
 
 실시간 뉴스 자동 수집 자체는 API 키 없이도 동작하지만(구글 뉴스는 무료 공개 RSS), 이를 **한국어로
-번역**하려면 OpenAI(또는 Gemini) API 키가 필요합니다. 아래 두 가지 방법 중 편한 방법을 사용하세요.
+번역**하려면 Google Gemini API 키(`GEMINI_API_KEY`)가 필요합니다.
+사용 모델: **`gemini-1.5-flash`** (가성비·속도에 유리)
 
-### 방법 1) `.env` 파일 사용 (로컬 개발 환경 추천)
+키 발급: [Google AI Studio](https://aistudio.google.com/apikey)
 
-```bash
-cp .env.example .env
-```
-
-그 다음 `.env` 파일을 열어 아래처럼 실제 발급받은 키를 입력합니다.
-
-```
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### 방법 2) Streamlit `secrets.toml` 사용 (Streamlit Community Cloud 배포 시 추천)
+### 방법 1) Streamlit `secrets.toml` 사용 (권장, 배포 환경)
 
 ```bash
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
@@ -81,23 +72,26 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 그 다음 `.streamlit/secrets.toml` 파일을 열어 실제 키를 입력합니다.
 
 ```toml
-OPENAI_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+GEMINI_API_KEY = "your-gemini-api-key-here"
 ```
 
+코드에서는 `st.secrets["GEMINI_API_KEY"]`로 안전하게 읽어옵니다.
 Streamlit Community Cloud에 배포할 때는 앱 설정(App settings) → **Secrets** 메뉴에 동일한 내용을
 붙여넣으면 됩니다.
 
-> ⚠️ `.env`와 `secrets.toml`은 모두 `.gitignore`에 등록되어 있어 실수로 GitHub에 올라가지 않습니다.
+### 방법 2) `.env` 파일 사용 (로컬 개발용 보조)
 
-### (선택) OpenAI 대신 Gemini API 사용하기
+```bash
+cp .env.example .env
+```
+
+그 다음 `.env` 파일을 열어 아래처럼 실제 발급받은 키를 입력합니다.
 
 ```
-AI_PROVIDER=gemini
 GEMINI_API_KEY=your-gemini-api-key-here
 ```
 
-위 두 줄을 `.env`(또는 `secrets.toml`)에 추가하고, `pip install google-genai`로 패키지를 추가
-설치하면 Gemini API로 번역하도록 전환됩니다.
+> ⚠️ `.env`와 `secrets.toml`은 모두 `.gitignore`에 등록되어 있어 실수로 GitHub에 올라가지 않습니다.
 
 ## 참고 사항
 
