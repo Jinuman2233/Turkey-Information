@@ -14,7 +14,7 @@
 #
 # 화면 구성 순서 (위 -> 아래):
 #   1) 상단: EUR/TRY, USD/TRY, TRY/KRW 환율 카드 (각 카드 아래 최근 3개월 추이 그래프 포함)
-#   2) 터키 소비자물가지수(CPI) 3년 장기 추이 (FRED)
+#   2) 터키 소비자물가지수(TÜİK TÜFE/CPI) 3년 장기 추이 + 최근 12개월 MoM 표
 #   3) 터키 기준금리 (최근 2년 월별 그래프)
 #   4) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
@@ -28,7 +28,13 @@ from plotly.subplots import make_subplots
 
 # 우리가 modules 폴더에 나누어 만든 함수들을 가져옵니다.
 from modules.fx_rates import get_all_fx_rates, get_fx_history, FX_TICKERS
-from modules.cpi_data import get_turkey_cpi_data
+from modules.cpi_data import (
+    LABOR_NEGOTIATION_NOTE,
+    OFFICIAL_SOURCE_LABEL,
+    get_recent_mom_table,
+    get_recent_mom_vertical_table,
+    get_turkey_cpi_data,
+)
 from modules.policy_rate import get_policy_rate_dataframe, get_latest_policy_rate
 from modules.minimum_wage import (
     get_minimum_wage_info,
@@ -243,8 +249,8 @@ def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E",
 # =============================================================================
 st.title("🇹🇷 터키 비즈니스 & 경제 동향 대시보드")
 st.caption(
-    "환율 · 소비자물가(CPI) · 기준금리 · 최저임금 · 현지 뉴스를 한 화면에서 확인하세요. "
-    "(환율은 yfinance, CPI는 FRED, 뉴스는 구글 뉴스 자동 수집 + AI 한국어 번역 데이터입니다.)"
+    "환율 · 소비자물가(TÜİK TÜFE) · 기준금리 · 최저임금 · 현지 뉴스를 한 화면에서 확인하세요. "
+    "(환율은 yfinance, CPI는 TÜİK 공식 TÜFE, 뉴스는 구글 뉴스 자동 수집 + AI 한국어 번역 데이터입니다.)"
 )
 
 st.divider()
@@ -330,15 +336,17 @@ st.divider()
 
 
 # =============================================================================
-# 3. 섹션 2 — 터키 소비자물가지수(CPI) 3년 장기 추이
+# 3. 섹션 2 — 터키 소비자물가지수(TÜİK TÜFE / CPI) 3년 장기 추이
 # -----------------------------------------------------------------------------
 # 환율 카드 바로 아래, 기준금리 섹션 바로 위에 배치합니다.
-# modules/cpi_data.py 에서 FRED(TURCPIALLMINMEI) CPI 지수를 가져와
-# YoY / MoM 상승률을 계산합니다. API 실패 시 더미 데이터로 대체됩니다.
+# modules/cpi_data.py 에서 TÜİK 공식 TÜFE를 우선 수집하고,
+# YoY / MoM 상승률·최근 12개월 MoM 표를 보여줍니다.
 # =============================================================================
-render_section_title("📈 터키 소비자물가지수 (CPI) 3년 장기 추이")
+render_section_title("📈 터키 소비자물가지수 (TÜİK TÜFE / CPI) 3년 장기 추이")
+st.caption(f"공식 출처: {OFFICIAL_SOURCE_LABEL}")
+st.info(LABOR_NEGOTIATION_NOTE)
 
-with st.spinner("터키 CPI 데이터를 불러오는 중입니다..."):
+with st.spinner("TÜİK TÜFE(소비자물가지수) 데이터를 불러오는 중입니다..."):
     cpi_data = get_turkey_cpi_data()
 
 cpi_df = cpi_data["df"]
@@ -348,9 +356,9 @@ yoy_change = cpi_data["yoy_change"]
 latest_cpi_month = cpi_data["latest_month"]
 
 if cpi_df is None or cpi_df.empty or latest_yoy is None:
-    st.warning("⚠️ 터키 CPI 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    st.warning("⚠️ 터키 CPI(TÜFE) 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
 else:
-    # 3-1) 핵심 지표 카드 3열: YoY / MoM / YoY 변동폭(%p)
+    # 3-1) 핵심 지표 카드 3열: YoY / MoM / YoY 변동폭(%p) — 기존 유지
     yoy_col, mom_col, chg_col = st.columns(3)
 
     with yoy_col:
@@ -387,7 +395,19 @@ else:
 
     st.caption(f"기준월: {latest_cpi_month}")
 
-    # 3-2) 복합 차트: YoY 꺾은선(주축) + MoM 막대(보조축)
+    # 3-2) 최근 12개월 MoM 테이블 (3년 장기 차트 바로 위)
+    # 임금 인상률·물가상승분 누적 변동을 월별로 직관적으로 확인하기 위한 표입니다.
+    st.markdown("**최근 12개월 전월 대비 물가상승률 (MoM %)**")
+    mom_wide = get_recent_mom_table(cpi_df, months=12)
+    mom_vertical = get_recent_mom_vertical_table(cpi_df, months=12)
+    if not mom_wide.empty:
+        st.dataframe(mom_wide, width="stretch")
+    if not mom_vertical.empty:
+        # 모바일 등에서 가로표가 잘릴 때를 대비한 세로형 보조 표
+        with st.expander("세로형으로 보기 (연-월 / MoM %)", expanded=False):
+            st.dataframe(mom_vertical, width="stretch", hide_index=True)
+
+    # 3-3) 복합 차트: YoY 꺾은선(주축) + MoM 막대(보조축)
     fig_cpi = make_subplots(specs=[[{"secondary_y": True}]])
 
     # 배경 막대: 월간 물가상승률(MoM %) — 연한 색으로 보조 정보
@@ -442,12 +462,12 @@ else:
 
     if cpi_data.get("is_dummy"):
         st.caption(
-            "⚠️ 현재 표시 중인 CPI는 API 호출 실패로 인한 참고용 더미 데이터입니다. "
-            "(대략적인 최근 3년 터키 물가 추이 수준을 반영)"
+            "⚠️ 실시간 수집에 실패해 TÜİK 공식 발표치를 반영한 오프라인 폴백 데이터를 표시 중입니다. "
+            f"(수집 경로: {cpi_data.get('source', 'fallback')} · 하루 1회 갱신 시도)"
         )
     else:
         st.caption(
-            "데이터 출처: FRED · TURCPIALLMINMEI (OECD MEI Turkey CPI) · 하루 1회 자동 갱신"
+            f"데이터 출처: {OFFICIAL_SOURCE_LABEL} · 수집: {cpi_data.get('source', 'TÜİK')} · 하루 1회 자동 갱신"
         )
 
 st.divider()
