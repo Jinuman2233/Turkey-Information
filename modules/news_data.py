@@ -19,7 +19,16 @@
 #   - content_tr    : 터키어 원문 기사 내용 (예시, 더미 텍스트)
 #   - source        : 출처 (예시)
 #   - date          : 발행일 (예시)
+#   - link          : 원문 기사 링크 (예시 데이터라 실제 기사는 없으므로, 터키어 제목으로
+#                     검색되는 구글 검색 링크를 대신 넣어 둡니다)
+#
+# ※ modules/news_crawler.py(실시간 AI 번역 뉴스)에서 반환하는 뉴스 데이터도
+#   동일한 key(category, title_kr, summary_kr, link, source, date)를 사용하도록
+#   맞춰 두었습니다. 그래서 app.py의 화면을 그리는 코드는 두 데이터 소스 중
+#   어떤 것을 받아도 수정 없이 그대로 동작합니다.
 # =============================================================================
+
+from urllib.parse import quote_plus
 
 
 DUMMY_NEWS = [
@@ -134,6 +143,12 @@ DUMMY_NEWS = [
         "date": "2026-07-05",
     },
 ]
+
+
+# 더미 데이터에는 실제 기사 링크가 없으므로, 터키어 제목으로 검색되는
+# 구글 검색 링크를 만들어서 "링크가 항상 동작하는" 예시로 사용합니다.
+for _news_item in DUMMY_NEWS:
+    _news_item["link"] = f"https://www.google.com/search?q={quote_plus(_news_item['title_tr'])}"
 
 
 def get_dummy_news() -> list:

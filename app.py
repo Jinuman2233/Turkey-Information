@@ -8,8 +8,9 @@
 #
 # 이 파일 하나에서 전체 화면 구성을 담당하고, 실제 데이터를 가져오는 로직은
 # modules/ 폴더 안의 각 파일(fx_rates.py, policy_rate.py, minimum_wage.py,
-# news_data.py)에 나누어 정리했습니다. 이렇게 "기능별로 파일을 나누는 것"을
-# 모듈화(modularization)라고 하며, 코드가 길어져도 유지보수하기 쉬워집니다.
+# news_data.py, news_crawler.py)에 나누어 정리했습니다. 이렇게 "기능별로
+# 파일을 나누는 것"을 모듈화(modularization)라고 하며, 코드가 길어져도
+# 유지보수하기 쉬워집니다.
 #
 # 화면 구성 순서 (위 -> 아래):
 #   1) 상단: EUR/TRY, USD/TRY, TRY/KRW 환율 카드 (각 카드 아래 최근 3개월 추이 그래프 포함)
@@ -17,7 +18,7 @@
 #   3) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
 #      - 시간당 최저임금 (Net, 세후 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
-#   4) 터키 현지 뉴스 (더미 데이터, 펼치면 터키어 원문 확인 가능)
+#   4) 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역, 실패 시 더미 데이터로 자동 대체)
 # =============================================================================
 
 import streamlit as st
@@ -33,6 +34,7 @@ from modules.minimum_wage import (
     MONTHLY_WORKING_HOURS,
 )
 from modules.news_data import get_dummy_news
+from modules.news_crawler import get_ai_translated_news, is_ai_translation_configured
 
 
 # =============================================================================
@@ -210,7 +212,7 @@ def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E",
 st.title("🇹🇷 터키 비즈니스 & 경제 동향 대시보드")
 st.caption(
     "환율 · 기준금리 · 최저임금 · 현지 뉴스를 한 화면에서 확인하세요. "
-    "(환율은 yfinance 실시간 데이터, 뉴스는 레이아웃 확인용 예시 데이터입니다.)"
+    "(환율은 yfinance 실시간 데이터, 뉴스는 구글 뉴스 자동 수집 + AI 한국어 번역 데이터입니다.)"
 )
 
 st.divider()
@@ -463,42 +465,82 @@ st.divider()
 
 
 # =============================================================================
-# 5. 섹션 4 — 터키 현지 뉴스 (무역 / 관세 / 최저임금 / 노조)
+# 5. 섹션 4 — 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역)
 # -----------------------------------------------------------------------------
-# 지금은 modules/news_data.py 의 더미(임시) 데이터를 사용해서 화면 레이아웃만
-# 먼저 잡아둔 상태입니다. 나중에 실제 뉴스 API/크롤러를 연결할 때는
-# get_dummy_news() 함수의 반환값만 실제 데이터로 바꿔주면 됩니다.
+# modules/news_crawler.py 에서 다음과 같은 순서로 뉴스를 준비해 옵니다.
+#   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
+#      이민·비자, 노무·노동조합, 물류·인프라, 외투기업·제조업 규제)의
+#      최신 기사를 수집
+#   2) OpenAI API(또는 Gemini API)로 각 기사의 제목/요약을 한국어로 번역
+#   3) 결과를 12시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
 #
-# 각 뉴스는 다음과 같이 구성됩니다.
-#   - 제목 + 한국어 3줄 요약 : 펼치지 않아도 바로 보이는 부분
-#   - st.expander(...)      : 클릭하면 펼쳐지면서 터키어 원문이 보이는 부분
+# API 키가 설정되어 있지 않거나(테스트 환경 등) 네트워크/번역에 실패하면,
+# modules/news_data.py 의 더미 데이터로 자동 대체(fallback)해서 화면이
+# 비어 보이지 않도록 합니다. -> 이렇게 하면 기존에 만들어 둔 더미 데이터 코드를
+# 하나도 지우거나 수정하지 않고, "새로운 실데이터 모듈"만 추가로 연결할 수 있습니다.
+#
+# [메인 화면 UI]
+#   - '한국어로 번역된 기사 제목' 목록만 깔끔하게 보여줍니다 (st.expander의
+#     접힌 상태 라벨을 제목으로 사용).
+# [제목을 클릭해서 펼쳤을 때(expander 내부) UI]
+#   - 한국어로 번역/요약된 기사 본문(3줄 요약)
+#   - 🔗 원문 기사로 이동하는 링크 (새 창에서 열림)
 # =============================================================================
-render_section_title("📰 터키 현지 뉴스 (무역 · 관세 · 최저임금 · 노조)")
+render_section_title("📰 실시간 터키 뉴스 (AI 한국어 번역)")
 
-news_list = get_dummy_news()
+ai_ready = is_ai_translation_configured()
 
+if ai_ready:
+    # get_ai_translated_news()는 내부적으로 @st.cache_data(ttl=12시간)가 적용되어 있어서,
+    # 캐시가 살아있는 동안에는 API를 다시 호출하지 않고 즉시 결과를 돌려줍니다.
+    news_list = get_ai_translated_news()
+
+    if news_list:
+        is_dummy_news = False
+    else:
+        # API 키는 설정돼 있지만 수집/번역에 실패한 경우 (네트워크 오류, 요금 한도 초과 등)
+        st.warning(
+            "⚠️ 실시간 뉴스를 가져오지 못했습니다 (네트워크 오류 또는 API 호출 실패). "
+            "우선 예시 데이터를 표시합니다."
+        )
+        news_list = get_dummy_news()
+        is_dummy_news = True
+else:
+    # OPENAI_API_KEY(또는 GEMINI_API_KEY)가 설정되어 있지 않은 경우
+    st.info(
+        "💡 AI 번역 기능을 사용하려면 OpenAI(또는 Gemini) API 키를 설정해 주세요. "
+        "설정 전까지는 예시(더미) 뉴스를 표시합니다. (설정 방법은 README.md 참고)"
+    )
+    news_list = get_dummy_news()
+    is_dummy_news = True
+
+# 메인 화면에는 "제목 리스트"만 깔끔하게 보이도록, st.expander의 라벨(닫혀 있을 때
+# 보이는 글자)에 번역된 한국어 제목만 넣습니다. 클릭해서 펼쳤을 때만 요약/링크가 보입니다.
 for news in news_list:
-    with st.container(border=True):
-        # 카테고리 배지(태그)와 발행일/출처를 한 줄에 표시
+    with st.expander(f"📰 {news['title_kr']}"):
+        # 펼쳤을 때 맨 위에 카테고리·날짜·출처를 작은 글씨로 보여줍니다.
         st.markdown(
             f"<span class='news-badge'>{news['category']}</span> "
             f"<span class='small-caption'>{news['date']} · {news['source']}</span>",
             unsafe_allow_html=True,
         )
 
-        # 한국어 제목 (굵고 크게)
-        st.markdown(f"#### {news['title_kr']}")
-
-        # 한국어 3줄 요약 — 리스트 형태의 각 문장을 불릿(•)으로 보여줍니다.
+        # 한국어로 번역/요약된 기사 본문(3줄 요약)을 불릿(•) 형태로 보여줍니다.
         for line in news["summary_kr"]:
             st.markdown(f"- {line}")
 
-        # st.expander를 사용하면 기본적으로는 접혀 있다가,
-        # 사용자가 클릭하면 펼쳐지면서 안의 내용(터키어 원문)이 보입니다.
-        # 이렇게 하면 화면이 복잡해지지 않고, 필요한 사람만 원문을 확인할 수 있습니다.
-        with st.expander("🇹🇷 터키어 원문 기사 보기 (Orijinal Türkçe Haber)"):
-            st.markdown(f"**{news['title_tr']}**")
-            st.write(news["content_tr"])
+        st.markdown("")  # 약간의 여백
+
+        # 🔗 원문 기사 링크 — st.link_button은 클릭하면 항상 새 창(새 탭)에서 열립니다.
+        if news.get("link"):
+            st.link_button("🔗 원문 기사 보기 (새 창에서 열림)", news["link"])
+        else:
+            st.caption("원문 링크가 제공되지 않는 데이터입니다.")
+
+if is_dummy_news:
+    st.caption("⚠️ 현재 표시 중인 뉴스는 레이아웃 확인용 예시(더미) 데이터입니다.")
+else:
+    st.caption("데이터 출처: Google News RSS + AI 번역 · 12시간마다 자동 갱신")
 
 st.divider()
 
@@ -508,5 +550,6 @@ st.divider()
 st.caption(
     "본 대시보드의 환율 정보는 Yahoo Finance(yfinance) 데이터를 기반으로 하며, "
     "투자/거래 판단의 참고 자료일 뿐 공식 금융 정보로 사용할 수 없습니다. "
-    "뉴스 섹션은 현재 레이아웃 확인용 예시(더미) 데이터입니다."
+    "뉴스 섹션은 Google News RSS 원문을 AI로 번역한 결과이므로, 중요한 의사결정 전에는 "
+    "반드시 원문 기사를 통해 사실관계를 다시 확인해 주세요."
 )
