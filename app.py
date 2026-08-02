@@ -16,7 +16,7 @@
 #   2) 터키 기준금리 (최근 2년 월별 그래프)
 #   3) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
-#      - 시간당 최저임금 (Net, 세후 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
+#      - 시간당 최저임금 (Gross, 세전 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
 #   4) 터키 현지 뉴스 (더미 데이터, 펼치면 터키어 원문 확인 가능)
 # =============================================================================
 
@@ -29,7 +29,7 @@ from modules.policy_rate import get_policy_rate_dataframe, get_latest_policy_rat
 from modules.minimum_wage import (
     get_minimum_wage_info,
     convert_wage_to_foreign_currencies,
-    get_hourly_net_wage_try,
+    get_hourly_gross_wage_try,
     MONTHLY_WORKING_HOURS,
 )
 from modules.news_data import get_dummy_news
@@ -385,7 +385,7 @@ st.divider()
 # 환율 데이터(fx_rates)를 이용해 EUR / USD / KRW로 환산해서 함께 보여줍니다.
 #
 # 4-1) 월 최저임금 : Gross(세전) 기준으로 표시
-# 4-2) 시간당 최저임금 : Net(세후, 실수령액) 기준으로 표시 (월 근무시간 255시간 기준)
+# 4-2) 시간당 최저임금 : Gross(세전) 기준으로 표시 (월 근무시간 255시간 기준)
 # =============================================================================
 render_section_title("💰 터키 최저임금 (Gross, 세전 기준)")
 
@@ -433,30 +433,30 @@ with wage_col4:
 st.caption("⚠️ 최저임금 금액은 예시 기준 데이터이며, 최신 정부 발표 금액으로 업데이트가 필요합니다.")
 
 # -----------------------------------------------------------------------------
-# 4-2) 시간당 최저임금 (Net, 세후 실수령액 기준)
+# 4-2) 시간당 최저임금 (Gross, 세전 기준)
 # -----------------------------------------------------------------------------
-# '월 Net(세후) 최저임금'을 '월 근무시간(255시간)'으로 나누어 시간당 금액을 구하고,
+# '월 Gross(세전) 최저임금'을 '월 근무시간(255시간)'으로 나누어 시간당 금액을 구하고,
 # 이를 동일한 방식으로 EUR / USD / KRW로 환산해서 보여줍니다.
 # -----------------------------------------------------------------------------
 st.markdown(
     f"<div style='margin-top:0.8rem; font-weight:700;'>⏱️ 시간당 최저임금 "
-    f"(Net, 월 {MONTHLY_WORKING_HOURS}시간 근무 기준)</div>",
+    f"(Gross, 세전 기준 · 월 {MONTHLY_WORKING_HOURS}시간 근무)</div>",
     unsafe_allow_html=True,
 )
 
-hourly_net_wage_try = get_hourly_net_wage_try(monthly_hours=MONTHLY_WORKING_HOURS)
-hourly_converted = convert_wage_to_foreign_currencies(hourly_net_wage_try, fx_rates)
+hourly_gross_wage_try = get_hourly_gross_wage_try(monthly_hours=MONTHLY_WORKING_HOURS)
+hourly_converted = convert_wage_to_foreign_currencies(hourly_gross_wage_try, fx_rates)
 
 hourly_col1, hourly_col2, hourly_col3, hourly_col4 = st.columns(4)
 
 with hourly_col1:
     with st.container(border=True):
-        st.markdown("**시간당 최저임금 (TRY, Net)**")
+        st.markdown("**시간당 최저임금 (TRY, Gross)**")
         st.markdown(
-            f"<div class='big-number'>₺ {format_number(hourly_net_wage_try, 2)}</div>",
+            f"<div class='big-number'>₺ {format_number(hourly_gross_wage_try, 2)}</div>",
             unsafe_allow_html=True,
         )
-        st.caption(f"월 {format_number(wage_info['net_wage_try'], 0)} TRY ÷ {MONTHLY_WORKING_HOURS}시간")
+        st.caption(f"월 {format_number(wage_info['gross_wage_try'], 0)} TRY ÷ {MONTHLY_WORKING_HOURS}시간")
 
 with hourly_col2:
     with st.container(border=True):
