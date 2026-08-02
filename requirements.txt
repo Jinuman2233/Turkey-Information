@@ -2,6 +2,8 @@ streamlit>=1.36.0
 yfinance>=0.2.40
 pandas>=2.0.0
 plotly>=5.20.0
+pandas-datareader>=0.10.0    # FRED 등 공개 경제 데이터(터키 CPI) 조회
+python-dateutil>=2.8.0       # CPI 조회 기간(월 단위) 계산
 
 # --- 실시간 뉴스 수집 + AI 번역 기능(modules/news_crawler.py)에 필요한 패키지 ---
 feedparser>=6.0.10           # 구글 뉴스 RSS 피드를 읽어오는 라이브러리
