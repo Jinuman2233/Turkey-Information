@@ -46,6 +46,7 @@ from modules.news_data import get_dummy_news
 from modules.news_crawler import (
     API_DAILY_QUOTA_MESSAGE,
     API_RATE_LIMIT_MESSAGE,
+    API_TRANSLATION_BUSY_MESSAGE,
     clear_news_fetch_cooldown,
     fetch_ai_translated_news,
     is_ai_translation_configured,
