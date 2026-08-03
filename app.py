@@ -714,6 +714,10 @@ if ai_ready:
         or "API 처리 지연" in error_text
         or "1분 후 새로고침" in error_text
     )
+    is_translation_busy = (
+        error_text == API_TRANSLATION_BUSY_MESSAGE
+        or "번역 서버와 통신" in error_text
+    )
 
     if news_error:
         if is_daily_quota:
@@ -733,7 +737,13 @@ if ai_ready:
             if st.button("지금 다시 시도", key="retry_gemini_news"):
                 clear_news_fetch_cooldown()
                 st.rerun()
+        elif is_translation_busy:
+            # 모델 404/일시 통신 오류 — 짧은 한글 안내.
+            # (실제 API 응답 원문은 modules/news_crawler.py가 실패 시점에
+            #  st.error()로 이미 화면에 출력합니다 — 디버깅 모드)
+            st.warning(f"⚠️ {API_TRANSLATION_BUSY_MESSAGE}")
         else:
+            # API 키 등 사용자가 직접 조치해야 하는 경우만 체크리스트를 보여줍니다.
             st.warning(
                 "⚠️ 실시간 뉴스 AI 번역에 문제가 있습니다.\n\n"
                 f"**원인:** {news_error}\n\n"
@@ -742,7 +752,7 @@ if ai_ready:
                 '   `GEMINI_API_KEY = "AIza...실제키"`  (예시 값 your-gemini-api-key-here 이면 안 됨)\n'
                 "2. Secrets 저장 후 앱 메뉴에서 **Reboot** 실행\n"
                 "3. Google AI Studio(https://aistudio.google.com/apikey)에서 키가 유효한지 확인\n"
-                "4. 배포 후 `google-generativeai` 패키지가 설치되도록 requirements.txt가 main에 반영됐는지 확인"
+                "4. 위쪽에 표시된 [디버그] Gemini REST API 오류 메시지에서 정확한 원인(HTTP 코드/응답 본문)을 확인"
             )
 
     if news_list:

@@ -6,9 +6,13 @@
 # 전체 흐름 (아래로 갈수록 더 구체적인 작업입니다):
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 관련 기사 5개 주제를 수집
 #   2) 각 기사의 제목/요약(원문, 보통 영어 또는 터키어)을 정리
-#   3) Google Gemini API(google-generativeai)를 이용해 한국어로 번역 + 3줄 요약
-#   4) 결과를 Streamlit 캐시(@st.cache_data, 6시간)에 저장해서
-#      같은 6시간 안에는 API를 다시 호출하지 않도록 함 (비용 절감 + 속도 향상)
+#   3) Google Gemini REST API(https://generativelanguage.googleapis.com/v1beta/...)를
+#      requests로 "직접" 호출해 한국어로 번역 + 3줄 요약합니다.
+#      ⚠️ Streamlit Cloud에서 google-generativeai SDK 버전 호환성 문제로 반복적으로
+#      404(모델 인식 실패)/통신 오류가 발생해, SDK 의존성을 완전히 제거하고
+#      순수 REST 방식으로 직접 통신하도록 전면 개편했습니다.
+#   4) 결과를 Streamlit 캐시(@st.cache_data, 12시간)에 저장해서
+#      같은 시간 안에는 API를 다시 호출하지 않도록 함 (비용 절감 + 속도 향상)
 #      ※ 번역은 기사별 호출이 아니라 배치 1~2회로 묶어 429(RPM 제한)를 피합니다.
 #
 # ⚠️ 이 모듈은 modules/news_data.py(더미 뉴스)를 대체하는 것이 아니라,
@@ -62,13 +66,10 @@ try:
 except ImportError:
     pass
 
-# google-generativeai 패키지 (Gemini API 호출용).
-# 설치되어 있지 않으면 None으로 두고, 실제로 번역을 시도할 때에만 에러 메시지를 보여줍니다.
-# 설치 방법: pip install google-generativeai
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
+# ⚠️ google-generativeai SDK는 더 이상 사용하지 않습니다.
+# Streamlit Cloud 환경에서 SDK 버전에 따라 "404 models/gemini-1.5-flash is not found"
+# 같은 모델 인식 오류가 반복적으로 발생해, Gemini REST API를 requests로 직접
+# 호출하는 방식으로 전환했습니다. (아래 "3. AI 번역/요약" 섹션 참고)
 
 
 # =============================================================================
@@ -285,12 +286,22 @@ def collect_all_raw_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
 
 
 # =============================================================================
-# 3. AI 번역/요약 (Google Gemini API — google-generativeai)
+# 3. AI 번역/요약 (Google Gemini REST API — SDK 미사용, requests 직접 호출)
 # -----------------------------------------------------------------------------
-# 가성비와 속도가 좋은 gemini-1.5-flash 모델을 사용합니다.
-# System Instruction에는 "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인
+# google-generativeai SDK는 Streamlit Cloud에서 버전 호환성 문제로 "404 model
+# not found" 등 오류를 자주 일으켜, 완전히 제거하고 REST API를 requests로
+# 직접 호출하는 방식으로 전환했습니다.
+#
+# 엔드포인트: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}
+# Headers   : {"Content-Type": "application/json"}
+# Payload   : {"contents": [{"parts": [{"text": "..."}]}], "generationConfig": {...}}
+#
+# System Instruction 자리에는 "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인
 # 어투로 터키어/영어 뉴스를 한국어로 번역 및 요약"하도록 지시합니다.
 # =============================================================================
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_REQUEST_TIMEOUT_SECONDS = 30
+
 # 우선 사용할 모델. 404(모델 없음)일 때만 다음 후보로 넘어갑니다.
 # (429/일일 한도에서는 절대 폴백하지 않아 요청 수를 늘리지 않습니다.)
 GEMINI_MODEL_NAME = "gemini-1.5-flash"
@@ -299,7 +310,8 @@ GEMINI_MODEL_CANDIDATES = (
     "gemini-1.5-flash-latest",
     "gemini-pro",  # 구형이지만 계정에서 비교적 안정적으로 남는 최종 우회 모델
 )
-# gemini-pro(1.0) 계열은 system_instruction / JSON mime 미지원인 경우가 있어 별도 호출합니다.
+# gemini-pro(1.0) 계열은 systemInstruction / response_mime_type(JSON) 미지원인
+# 경우가 있어, 시스템 지시문을 본문에 합쳐서 단순한 형태로 요청합니다.
 _LEGACY_GEMINI_MODELS = frozenset(
     {
         "gemini-pro",
@@ -319,7 +331,7 @@ _PLACEHOLDER_API_KEYS = {
     "xxx",
 }
 
-# GenerativeModel의 system_instruction 으로 전달되는 지시문입니다.
+# Gemini REST API의 systemInstruction(또는 legacy 모델은 본문)으로 전달되는 지시문입니다.
 # 배치 번역이므로, 여러 기사를 한 번에 받아 JSON 배열로 돌려주도록 지시합니다.
 TRANSLATION_SYSTEM_PROMPT = (
     "한국인 비즈니스/제조업 경영진이 읽기 편한 전문적인 어투로 "
@@ -347,8 +359,25 @@ class GeminiRateLimitError(NewsFetchError):
         self.kind = kind
 
 
+class GeminiHttpError(RuntimeError):
+    """
+    Gemini REST API가 200이 아닌 상태 코드를 반환했을 때 사용하는 예외.
+    status_code와 원본 응답 본문(response_text)을 그대로 보관해,
+    디버깅 화면에 "날것" 그대로 보여줄 수 있게 합니다.
+    """
+
+    def __init__(self, status_code: int, response_text: str, model_name: str):
+        message = f"HTTP {status_code} ({model_name}): {response_text}"
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+        self.model_name = model_name
+
+
 def _is_rate_limit_error(exc: Exception) -> bool:
     """예외 메시지가 429 / quota / rate limit 인지 판별합니다."""
+    if getattr(exc, "status_code", None) == 429:
+        return True
     text = str(exc).lower()
     return (
         "429" in text
@@ -379,53 +408,111 @@ def _is_daily_quota_error(exc: Exception) -> bool:
 
 def _is_model_not_found_error(exc: Exception) -> bool:
     """모델이 없어서 다음 후보를 시도해도 되는 오류인지 판별합니다."""
+    if getattr(exc, "status_code", None) == 404:
+        return True
     text = str(exc).lower()
     return (
         "404" in text
         or ("not found" in text and "model" in text)
         or "is not found" in text
-        or "models/" in text and "not found" in text
     )
 
 
-def _generate_with_model(model_name: str, user_prompt: str):
+def _build_gemini_rest_payload(model_name: str, user_prompt: str) -> dict:
     """
-    모델별로 호환되는 방식으로 generate_content를 호출합니다.
-    - 최신 flash: system_instruction + JSON mime
-    - gemini-pro 등 구형: 시스템 지시를 프롬프트에 합치고 단순 호출
-    """
-    if model_name in _LEGACY_GEMINI_MODELS:
-        model = genai.GenerativeModel(model_name)
-        legacy_prompt = (
-            f"{TRANSLATION_SYSTEM_PROMPT}\n\n"
-            f"{user_prompt}\n\n"
-            "중요: 응답은 JSON만 출력하세요."
-        )
-        return model.generate_content(
-            legacy_prompt,
-            generation_config={"temperature": 0.3},
-        )
+    Gemini REST API(generateContent) 요청 본문을 만듭니다.
 
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=TRANSLATION_SYSTEM_PROMPT,
-        generation_config={
-            "temperature": 0.3,
-            "response_mime_type": "application/json",
-        },
-    )
+    - gemini-1.5 계열: systemInstruction + response_mime_type(JSON)을 사용해
+      번역 지시와 사용자 프롬프트를 분리합니다.
+    - gemini-pro(1.0) 등 구형 모델: systemInstruction/JSON mime을 지원하지
+      않을 수 있어, 지시문을 본문(contents)에 합쳐서 단순하게 요청합니다.
+    """
+    is_legacy = model_name in _LEGACY_GEMINI_MODELS
+
+    if is_legacy:
+        contents_text = (
+            f"{TRANSLATION_SYSTEM_PROMPT}\n\n{user_prompt}\n\n"
+            "중요: 응답은 위에서 지정한 JSON 형식만 출력하세요."
+        )
+        payload = {
+            "contents": [{"parts": [{"text": contents_text}]}],
+            "generationConfig": {"temperature": 0.3},
+        }
+    else:
+        payload = {
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "systemInstruction": {"parts": [{"text": TRANSLATION_SYSTEM_PROMPT}]},
+            "generationConfig": {
+                "temperature": 0.3,
+                "response_mime_type": "application/json",
+            },
+        }
+    return payload
+
+
+def _extract_rest_response_text(data: dict) -> str:
+    """Gemini REST API의 JSON 응답에서 생성된 텍스트를 안전하게 꺼냅니다."""
     try:
-        return model.generate_content(user_prompt)
-    except Exception as exc:
-        # 모델 자체가 없으면 바깥 폴백(다음 모델)으로 넘깁니다.
-        if _is_model_not_found_error(exc):
-            raise
-        # system_instruction / JSON mime 미지원 등은 구형 방식으로 한 번 더 시도
-        model = genai.GenerativeModel(model_name)
-        return model.generate_content(
-            f"{TRANSLATION_SYSTEM_PROMPT}\n\n{user_prompt}\n\n중요: 응답은 JSON만 출력하세요.",
-            generation_config={"temperature": 0.3},
+        candidates = data.get("candidates") or []
+        for candidate in candidates:
+            content = candidate.get("content") or {}
+            parts = content.get("parts") or []
+            chunks = [part.get("text", "") for part in parts if part.get("text")]
+            if chunks:
+                return "\n".join(chunks).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _show_gemini_debug_error(model_name: str, status_code: int, response_text: str) -> None:
+    """
+    [디버깅 모드] Gemini REST API 호출 실패 시, 원인을 바로 파악할 수 있도록
+    응답 원문(response.text)을 뭉뚱그리지 않고 화면에 그대로 출력합니다.
+    """
+    try:
+        st.error(
+            f"🔧 [디버그] Gemini REST API 오류 — 모델: `{model_name}` · HTTP {status_code}\n\n"
+            f"```\n{response_text}\n```"
         )
+    except Exception:
+        # Streamlit 실행 컨텍스트 밖(단위 테스트 등)에서는 조용히 무시합니다.
+        pass
+
+
+def _call_gemini_rest_once(api_key: str, model_name: str, user_prompt: str) -> str:
+    """
+    Gemini REST API(v1beta generateContent)를 requests로 1회 직접 호출합니다.
+    SDK(google-generativeai)를 전혀 사용하지 않습니다.
+    """
+    url = f"{GEMINI_API_BASE_URL}/{model_name}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = _build_gemini_rest_payload(model_name, user_prompt)
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.exceptions.RequestException as exc:
+        # 네트워크 계층 오류(타임아웃/연결 실패 등)도 원문 그대로 보여줍니다.
+        _show_gemini_debug_error(model_name, 0, f"{type(exc).__name__}: {exc}")
+        raise
+
+    if response.status_code != 200:
+        # ★ 요청사항: 실패 시 API가 반환한 실제 에러 메시지를 화면에 날것 그대로 출력
+        _show_gemini_debug_error(model_name, response.status_code, response.text)
+        raise GeminiHttpError(response.status_code, response.text, model_name)
+
+    try:
+        data = response.json()
+    except ValueError:
+        _show_gemini_debug_error(model_name, response.status_code, response.text)
+        raise RuntimeError(f"Gemini 응답을 JSON으로 해석하지 못했습니다: {response.text[:500]}")
+
+    return _extract_rest_response_text(data)
 
 
 def _build_batch_user_prompt(raw_news_batch: list) -> str:
@@ -550,29 +637,6 @@ def is_ai_translation_configured() -> bool:
     return bool(_get_gemini_api_key())
 
 
-def _extract_response_text(response) -> str:
-    """Gemini 응답 객체에서 텍스트를 안전하게 꺼냅니다."""
-    try:
-        text = getattr(response, "text", None)
-        if text:
-            return str(text).strip()
-    except Exception:
-        # response.text 접근 시 finish_reason 등으로 예외가 날 수 있어 candidates를 직접 확인합니다.
-        pass
-
-    try:
-        candidates = getattr(response, "candidates", None) or []
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", None) or []
-            chunks = [getattr(part, "text", "") for part in parts if getattr(part, "text", "")]
-            if chunks:
-                return "\n".join(chunks).strip()
-    except Exception:
-        pass
-    return ""
-
-
 def _raise_rate_limit(exc: Exception):
     """429/쿼터 예외를 분당/일일 종류에 맞는 GeminiRateLimitError로 변환해 올립니다."""
     if _is_daily_quota_error(exc):
@@ -582,76 +646,43 @@ def _raise_rate_limit(exc: Exception):
 
 def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     """
-    Gemini API를 호출해 텍스트 응답을 반환합니다.
+    Gemini REST API를 순서대로 호출해 텍스트 응답을 반환합니다.
+    (google-generativeai SDK는 사용하지 않고, requests로 직접 통신합니다.)
 
-    호출 순서(404일 때만 다음으로 우회):
+    호출 순서(404 = 모델 인식 실패일 때만 다음으로 우회):
       1) gemini-1.5-flash
       2) gemini-1.5-flash-latest
-      3) gemini-pro  (최종 안전장치)
-    429/일일 한도는 즉시 중단합니다.
-    """
-    if genai is None:
-        raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE)
+      3) gemini-pro  (구형이지만 가장 안정적인 최종 안전장치)
+    429/일일 한도 오류는 즉시 중단합니다(추가 폴백 호출을 하지 않음).
 
-    genai.configure(api_key=api_key)
+    각 호출이 실패하면 _call_gemini_rest_once() 내부에서
+    st.error()로 원본 응답을 그대로 화면에 출력합니다(디버깅 모드).
+    """
     last_error = None
 
-    # -------------------------------------------------------------------------
-    # 1차: gemini-1.5-flash
-    # -------------------------------------------------------------------------
-    try:
-        response = _generate_with_model("gemini-1.5-flash", user_prompt)
-        raw_text = _extract_response_text(response)
-        if raw_text:
-            return raw_text
-        raise RuntimeError("빈 응답")
-    except GeminiRateLimitError:
-        raise
-    except Exception as exc:
-        if _is_rate_limit_error(exc):
-            _raise_rate_limit(exc)
-        last_error = exc
-        if not _is_model_not_found_error(exc):
-            # 모델 미발견이 아닌 통신/기타 오류 → 사용자용 한글 메시지로 정리
-            raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from exc
+    for index, model_name in enumerate(GEMINI_MODEL_CANDIDATES):
+        try:
+            if index > 0:
+                time.sleep(0.5)  # 폴백 호출 사이 최소 대기
+            raw_text = _call_gemini_rest_once(api_key, model_name, user_prompt)
+            if raw_text:
+                return raw_text
+            last_error = RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
+        except GeminiRateLimitError:
+            raise
+        except GeminiHttpError as exc:
+            last_error = exc
+            if _is_rate_limit_error(exc):
+                _raise_rate_limit(exc)
+            if _is_model_not_found_error(exc) and index < len(GEMINI_MODEL_CANDIDATES) - 1:
+                # 404(모델 인식 실패)일 때만 다음 후보로 우회합니다.
+                continue
+            break
+        except requests.exceptions.RequestException as exc:
+            # 네트워크 계층 오류는 폴백하지 않고 바로 실패 처리합니다.
+            last_error = exc
+            break
 
-    # -------------------------------------------------------------------------
-    # 2차: gemini-1.5-flash-latest (1차 404 우회)
-    # -------------------------------------------------------------------------
-    try:
-        time.sleep(0.5)
-        response = _generate_with_model("gemini-1.5-flash-latest", user_prompt)
-        raw_text = _extract_response_text(response)
-        if raw_text:
-            return raw_text
-        raise RuntimeError("빈 응답")
-    except GeminiRateLimitError:
-        raise
-    except Exception as exc:
-        if _is_rate_limit_error(exc):
-            _raise_rate_limit(exc)
-        last_error = exc
-        if not _is_model_not_found_error(exc):
-            raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from exc
-
-    # -------------------------------------------------------------------------
-    # 3차: gemini-pro (구형 안정 모델로 최종 우회)
-    # -------------------------------------------------------------------------
-    try:
-        time.sleep(0.5)
-        response = _generate_with_model("gemini-pro", user_prompt)
-        raw_text = _extract_response_text(response)
-        if raw_text:
-            return raw_text
-        raise RuntimeError("빈 응답")
-    except GeminiRateLimitError:
-        raise
-    except Exception as exc:
-        if _is_rate_limit_error(exc):
-            _raise_rate_limit(exc)
-        last_error = exc
-
-    # 모든 모델 후보 실패 — 영어 원문 에러 대신 한글 안내
     raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from last_error
 
 
@@ -716,11 +747,10 @@ def _humanize_gemini_error(exc: Exception) -> str:
             "Gemini API 권한 오류(403)입니다. "
             "Google AI Studio에서 키를 다시 발급받고, Generative Language API 사용이 가능한지 확인해 주세요."
         )
-    # 모델 404 / 서버 통신 / 패키지 / 기타 영어 에러는 모두 깔끔한 한글 안내로 통일
+    # 모델 404 / 서버 통신 / 기타 영어 에러는 모두 짧은 한글 안내로 통일합니다.
+    # (실제 원인 파악용 원문은 호출 시점에 st.error()로 이미 출력됩니다 — 디버깅 모드)
     if (
         _is_model_not_found_error(exc)
-        or "google-generativeai" in lowered
-        or "패키지" in text
         or "gemini" in lowered
         or "deadline" in lowered
         or "unavailable" in lowered
@@ -886,12 +916,6 @@ def _fallback_news_payload(error_message: str, error_kind: str, max_per_topic: i
 def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
     """성공한 뉴스 리스트만 캐시합니다. 실패 시 NewsFetchError를 발생시킵니다."""
     try:
-        if genai is None:
-            raise NewsFetchError(
-                "google-generativeai 패키지가 설치되어 있지 않습니다. "
-                "requirements.txt 반영 후 Streamlit Cloud에서 앱을 Reboot 해 주세요."
-            )
-
         api_key = _get_gemini_api_key()
         if not api_key:
             raise NewsFetchError(
@@ -982,23 +1006,13 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
             max_per_topic=max_per_topic,
         )
     except NewsFetchError as exc:
-        # 일반 실패도 가능하면 직전 성공 번역을 보여줍니다.
-        last_good = _load_last_good_news()
-        if last_good:
-            return {
-                "news": last_good,
-                "error": str(exc),
-                "cooldown_remaining": 0,
-                "error_kind": "other",
-                "news_mode": "stale_cache",
-            }
-        return {
-            "news": [],
-            "error": str(exc),
-            "cooldown_remaining": 0,
-            "error_kind": "other",
-            "news_mode": "empty",
-        }
+        # 일반 실패(모델 404 소진, 통신 오류 등)도 화면이 비지 않도록
+        # 이전 번역 캐시 → RSS 원문 순으로 대체합니다.
+        return _fallback_news_payload(
+            error_message=str(exc),
+            error_kind="other",
+            max_per_topic=max_per_topic,
+        )
     except Exception as exc:
         if _is_rate_limit_error(exc):
             rate_exc = GeminiRateLimitError(
@@ -1011,22 +1025,11 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
                 error_kind=rate_exc.kind,
                 max_per_topic=max_per_topic,
             )
-        last_good = _load_last_good_news()
-        if last_good:
-            return {
-                "news": last_good,
-                "error": _humanize_gemini_error(exc),
-                "cooldown_remaining": 0,
-                "error_kind": "other",
-                "news_mode": "stale_cache",
-            }
-        return {
-            "news": [],
-            "error": _humanize_gemini_error(exc),
-            "cooldown_remaining": 0,
-            "error_kind": "other",
-            "news_mode": "empty",
-        }
+        return _fallback_news_payload(
+            error_message=_humanize_gemini_error(exc),
+            error_kind="other",
+            max_per_topic=max_per_topic,
+        )
 
 
 def get_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):

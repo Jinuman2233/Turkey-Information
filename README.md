@@ -18,10 +18,13 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
    - 카드 하단에 `적용/발표일: YYYY년 MM월` 표시 (실패 시 2026년 공식 기준 폴백)
 5. **실시간 터키 뉴스 + AI 한국어 번역** — 무역·관세 / 이민·비자 / 노무·노동조합 / 물류·인프라 /
    외투기업·제조업 규제, 5가지 주제의 최신 뉴스를 구글 뉴스(Google News RSS)에서 자동 수집하고,
-   **Google Gemini API(`gemini-1.5-flash`)** 로 한국어 번역·요약까지 자동으로 처리합니다.
+   **Google Gemini REST API**(`gemini-1.5-flash` → 실패 시 `gemini-1.5-flash-latest` → `gemini-pro`)를
+   **SDK 없이 `requests`로 직접 호출**해 한국어 번역·요약까지 자동으로 처리합니다.
    - 메인 화면에는 번역된 **한국어 제목만** 깔끔한 리스트로 표시됩니다.
    - 제목을 클릭(`st.expander`)하면 한국어 3줄 요약과 **원문 기사 링크**(새 창으로 열림)가 펼쳐집니다.
    - API 키가 없거나 수집/번역에 실패하면, 레이아웃 확인용 예시(더미) 뉴스로 자동 대체됩니다.
+   - API 호출이 실패하면(200이 아닌 응답) 원인을 바로 알 수 있도록 **실제 응답 원문을 화면에
+     그대로(`st.error`) 출력**합니다 (디버깅 모드).
 
 ## 폴더 구조
 
@@ -34,7 +37,7 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 │   ├── policy_rate.py           # 터키 기준금리 월별 데이터
 │   ├── minimum_wage.py          # 터키 Gross 최저임금 자동 수집(CSGB 등) 및 환율 환산
 │   ├── news_data.py             # 뉴스 더미(예시) 데이터 — 실시간 수집 실패 시 대체용
-│   └── news_crawler.py          # 구글 뉴스 RSS 자동 수집 + Gemini(gemini-1.5-flash) 한국어 번역
+│   └── news_crawler.py          # 구글 뉴스 RSS 자동 수집 + Gemini REST API(requests 직접 호출) 한국어 번역
 ├── .streamlit/
 │   ├── config.toml              # 테마/서버 설정
 │   └── secrets.toml.example     # API 키 설정 예시 (실제 secrets.toml은 Git에 올리지 않음)
@@ -65,7 +68,12 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 
 실시간 뉴스 자동 수집 자체는 API 키 없이도 동작하지만(구글 뉴스는 무료 공개 RSS), 이를 **한국어로
 번역**하려면 Google Gemini API 키(`GEMINI_API_KEY`)가 필요합니다.
-사용 모델: **`gemini-1.5-flash`** (가성비·속도에 유리)
+
+번역은 `google-generativeai` SDK를 사용하지 않고, **Gemini REST API를 `requests`로 직접 호출**합니다
+(Streamlit Cloud에서 SDK 버전에 따라 발생하던 `404 model not found` 오류를 근본적으로 피하기 위함).
+
+- 엔드포인트: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}`
+- 모델 순서(404일 때만 다음으로 우회): `gemini-1.5-flash` → `gemini-1.5-flash-latest` → `gemini-pro`
 
 키 발급: [Google AI Studio](https://aistudio.google.com/apikey)
 
@@ -106,7 +114,7 @@ GEMINI_API_KEY=your-gemini-api-key-here
 1. Streamlit Cloud **Secrets**에 `GEMINI_API_KEY`가 없거나, 예시 값(`your-gemini-api-key-here`) 그대로임  
 2. Secrets 저장 후 앱을 **Reboot**하지 않음  
 3. 키가 잘못되었거나 Google AI Studio에서 비활성화됨  
-4. 배포 환경에 `google-generativeai` 패키지가 아직 설치되지 않음 (`requirements.txt` 반영 + Reboot 필요)
+4. Gemini REST API가 일시적으로 404/5xx 등을 반환함 (아래 디버그 메시지 참고)
 
 Secrets 예시:
 
@@ -116,6 +124,12 @@ GEMINI_API_KEY = "AIzaSy...."
 
 저장 후 앱 우측 하단 메뉴 → **Reboot app** 을 한 번 실행해 주세요.  
 경고 메시지에 표시되는 **원인** 문구를 보면 어디를 고쳐야 하는지 바로 확인할 수 있습니다.
+
+**디버깅 모드:** Gemini REST API 호출이 실패하면(HTTP 200이 아니면), 뉴스 섹션 위에
+`🔧 [디버그] Gemini REST API 오류 — 모델: ... · HTTP ...` 형태로 **API가 반환한 응답 원문을
+그대로** 보여줍니다. 여기 표시되는 HTTP 상태 코드와 본문(JSON 에러 메시지)을 보면
+API 키 오류(400/403)인지, 모델 인식 실패(404)인지, 요청 한도 초과(429)인지 정확히
+구분할 수 있습니다.
 
 ### `API 처리 지연` / 일일 사용량 초과 메시지가 뜰 때
 
@@ -142,6 +156,7 @@ Gemini 무료 티어는 **분당 요청 수(RPM)** 와 **일일 사용량** 한�
 - 뉴스 자동 수집(`modules/news_crawler.py`)은 구글 뉴스 RSS 기사의 제목/요약만을 근거로 AI가
   번역·요약한 결과입니다. 중요한 의사결정 전에는 반드시 원문 기사 링크를 통해 사실관계를
   다시 확인해 주세요. 번역 결과는 비용 절감과 속도 향상(및 429 RPM 제한 회피)을 위해
-  **6시간 동안 캐시**되며, Gemini 호출은 기사별이 아니라 **배치 1~2회**로 처리됩니다.
+  **최대 12시간 동안 캐시**되며, Gemini 호출은 기사별이 아니라 **배치 1회**로 처리됩니다.
+  Gemini 호출은 `google-generativeai` SDK 없이 REST API를 `requests`로 직접 호출합니다.
 - API 키가 없거나 수집/번역에 실패하면 `modules/news_data.py`의 더미 데이터로 자동 대체되므로,
   뉴스 섹션이 비어 보이는 일은 없습니다.
