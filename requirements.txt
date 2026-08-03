@@ -8,7 +8,10 @@ lxml>=4.9.0                  # TCMB/TÜİK TÜFE HTML 표 파싱(pd.read_html)
 
 # --- 실시간 뉴스 수집 + AI 번역 기능(modules/news_crawler.py)에 필요한 패키지 ---
 feedparser>=6.0.10           # 구글 뉴스 RSS 피드를 읽어오는 라이브러리
-requests>=2.31.0             # RSS/웹페이지를 안전하게(timeout 포함) 내려받기 위한 라이브러리
+requests>=2.31.0             # RSS/웹페이지 및 Gemini REST API 직접 호출에 사용 (SDK 미사용)
 beautifulsoup4>=4.12.0       # 최저임금(CSGB 등) HTML 파싱
-google-generativeai>=0.8.5   # Gemini 최신 모델명 인식용 (1.5-flash / flash-latest / pro 폴백)
 python-dotenv>=1.0.0         # 로컬 개발 시 .env 파일에서 API 키를 불러오기 위한 라이브러리
+# ⚠️ google-generativeai(SDK)는 더 이상 사용하지 않습니다.
+# Streamlit Cloud에서 SDK 버전 호환성 문제로 404(모델 인식 실패)가 반복 발생해,
+# Gemini REST API(https://generativelanguage.googleapis.com/...)를 requests로
+# 직접 호출하는 방식으로 전환했습니다 (modules/news_crawler.py 참고).
