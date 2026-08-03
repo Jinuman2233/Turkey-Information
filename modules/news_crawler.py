@@ -108,12 +108,14 @@ NEWS_TOPICS = [
 
 # 한 번에 캐시가 갱신될 때 API 호출 비용을 통제하기 위한 기본값들입니다.
 DEFAULT_MAX_ARTICLES_PER_TOPIC = 1  # 주제(5개)당 몇 개의 기사를 가져올지 (5개 주제 x 1개 = 총 5개 기사)
-CACHE_TTL_SECONDS = 60 * 60 * 6  # 6시간 (성공한 번역 결과 캐시)
+CACHE_TTL_SECONDS = 60 * 60 * 12  # 12시간 (성공한 번역 결과 — 갱신 호출 자체를 줄임)
 BATCH_API_SLEEP_SECONDS = 4  # 배치를 2번 이상 나눠 호출할 때, 호출 사이 대기 시간(초)
 # ⚠️ 429가 난 뒤 새로고침할 때마다 API를 다시 치면, 제한이 더 오래가거나 일일 한도를
 # 더 빨리 소진합니다. 그래서 429 결과는 아래 쿨다운 시간 동안 재호출하지 않습니다.
 RATE_LIMIT_COOLDOWN_SECONDS = 180  # 분당(RPM) 제한: 3분 동안 재호출 금지
-DAILY_QUOTA_COOLDOWN_SECONDS = 60 * 60  # 일일 한도: 1시간 동안 재호출 금지
+# 일일 한도는 1시간 뒤 재시도해도 거의 복구되지 않으므로, 기본적으로 오래 막습니다.
+# (실제 적용 시간은 _daily_quota_cooldown_seconds()가 UTC 자정+여유분으로 계산)
+DAILY_QUOTA_COOLDOWN_SECONDS = 60 * 60 * 18  # 최소 18시간
 # Gemini 무료 티어는 대략 분당 15회(15 RPM) + 일일 요청 한도가 있습니다.
 API_RATE_LIMIT_MESSAGE = (
     "현재 API 처리 지연 중입니다. 약 3분 후 새로고침 해주세요. "
@@ -121,8 +123,8 @@ API_RATE_LIMIT_MESSAGE = (
 )
 API_DAILY_QUOTA_MESSAGE = (
     "Gemini 무료 티어 일일 사용량을 초과한 것 같습니다. "
-    "오늘은 예시 뉴스로 보시고, 내일 다시 시도하거나 "
-    "Google AI Studio에서 사용량/플랜을 확인해 주세요."
+    "API 재호출을 중단하고, 이전에 번역해 둔 뉴스 또는 원문 RSS로 대체 표시합니다. "
+    "내일 다시 시도하거나 Google AI Studio에서 사용량/플랜을 확인해 주세요."
 )
 
 # 프로세스 전역 쿨다운 상태.
@@ -290,9 +292,9 @@ def collect_all_raw_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
 # 우선 사용할 모델. 후보를 많이 두면 실패 시마다 API를 여러 번 호출해
 # 429(RPM) 제한을 더 쉽게 유발하므로, 후보는 최소로 유지합니다.
 GEMINI_MODEL_NAME = "gemini-1.5-flash"
+# 일일 한도 보호: 모델 폴백을 없애 실패 시 추가 호출이 나가지 않게 합니다.
 GEMINI_MODEL_CANDIDATES = (
     "gemini-1.5-flash",
-    "gemini-2.0-flash",
 )
 
 # 예시 파일에 들어 있는 자리표시자 값. 이런 값이 secrets에 있으면
@@ -636,10 +638,23 @@ def _humanize_gemini_error(exc: Exception) -> str:
     return f"Gemini/네트워크 오류: {text}"
 
 
+def _daily_quota_cooldown_seconds() -> int:
+    """
+    일일 한도 쿨다운 시간(초).
+    다음 UTC 자정(+10분 여유)까지로 잡아, 한도 리셋 전에는 Gemini를 다시 치지 않습니다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    next_reset = (now + timedelta(days=1)).replace(hour=0, minute=10, second=0, microsecond=0)
+    until_reset = int((next_reset - now).total_seconds())
+    return max(DAILY_QUOTA_COOLDOWN_SECONDS, until_reset)
+
+
 def _activate_rate_limit_cooldown(exc: GeminiRateLimitError) -> None:
     """429/일일 한도 오류 발생 시각부터 쿨다운을 겁니다."""
     seconds = (
-        DAILY_QUOTA_COOLDOWN_SECONDS if exc.kind == "daily" else RATE_LIMIT_COOLDOWN_SECONDS
+        _daily_quota_cooldown_seconds() if exc.kind == "daily" else RATE_LIMIT_COOLDOWN_SECONDS
     )
     _cooldown_state["until"] = time.time() + seconds
     _cooldown_state["error"] = str(exc) or _humanize_gemini_error(exc)
@@ -657,6 +672,105 @@ def get_news_fetch_cooldown_remaining() -> int:
     """쿨다운 잔여 초(없으면 0)를 반환합니다."""
     remaining = int(_cooldown_state["until"] - time.time())
     return max(0, remaining)
+
+
+@st.cache_resource
+def _last_good_news_store() -> dict:
+    """
+    프로세스 수명 동안 마지막 성공 번역을 보관합니다.
+    일일 한도/429가 나도 이전에 받아 둔 한국어 뉴스를 계속 보여주기 위함입니다.
+    """
+    return {"news": [], "saved_at": 0.0}
+
+
+def _save_last_good_news(news: list) -> None:
+    """성공한 번역 결과를 장기 보관 저장소에 넣습니다."""
+    if not news:
+        return
+    store = _last_good_news_store()
+    store["news"] = list(news)
+    store["saved_at"] = time.time()
+
+
+def _load_last_good_news() -> list:
+    """보관 중인 마지막 성공 번역을 반환합니다. 없으면 빈 리스트."""
+    store = _last_good_news_store()
+    news = store.get("news") or []
+    return list(news) if news else []
+
+
+def _raw_news_as_display_items(raw_news_list: list) -> list:
+    """
+    Gemini 없이 RSS 원문만으로 화면 표시용 항목을 만듭니다.
+    일일 한도 초과 시에도 '가짜 더미' 대신 실제 최신 기사 링크를 보여줍니다.
+    """
+    display_items = []
+    for raw in raw_news_list:
+        title = (raw.get("title_original") or "").strip() or "(제목 없음)"
+        summary = (raw.get("summary_original") or "").strip()
+        summary_lines = []
+        if summary:
+            # 원문 요약을 최대 3줄로 나눕니다.
+            chunks = [part.strip() for part in re.split(r"[\n\.!?]+", summary) if part.strip()]
+            summary_lines = chunks[:3] if chunks else [summary[:280]]
+        if not summary_lines:
+            summary_lines = [
+                "AI 번역 한도 초과로 원문 제목/요약만 표시합니다. 원문 링크에서 내용을 확인해 주세요."
+            ]
+        display_items.append(
+            {
+                "category": raw.get("category", ""),
+                "title_kr": f"{title} (원문)",
+                "summary_kr": summary_lines,
+                "link": raw.get("link", ""),
+                "source": raw.get("source", "Google News"),
+                "date": raw.get("date", ""),
+            }
+        )
+    return display_items
+
+
+def _rss_only_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC) -> list:
+    """Google News RSS만 수집해 표시용으로 반환합니다 (Gemini 호출 없음)."""
+    try:
+        raw_news_list = collect_all_raw_news(max_per_topic=max_per_topic)
+        return _raw_news_as_display_items(raw_news_list)
+    except Exception:
+        return []
+
+
+def _fallback_news_payload(error_message: str, error_kind: str, max_per_topic: int) -> dict:
+    """
+    Gemini 실패/쿨다운 시 사용할 대체 뉴스 payload.
+    우선순위: 마지막 성공 번역 → RSS 원문 → 빈 목록(앱에서 더미로 대체).
+    """
+    last_good = _load_last_good_news()
+    if last_good:
+        return {
+            "news": last_good,
+            "error": error_message,
+            "cooldown_remaining": get_news_fetch_cooldown_remaining(),
+            "error_kind": error_kind,
+            "news_mode": "stale_cache",
+        }
+
+    rss_news = _rss_only_news(max_per_topic=max_per_topic)
+    if rss_news:
+        return {
+            "news": rss_news,
+            "error": error_message,
+            "cooldown_remaining": get_news_fetch_cooldown_remaining(),
+            "error_kind": error_kind,
+            "news_mode": "rss_only",
+        }
+
+    return {
+        "news": [],
+        "error": error_message,
+        "cooldown_remaining": get_news_fetch_cooldown_remaining(),
+        "error_kind": error_kind,
+        "news_mode": "empty",
+    }
 
 
 # =============================================================================
@@ -738,42 +852,54 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
             "error": None 또는 사용자용 오류 안내 문자열,
             "cooldown_remaining": 쿨다운 잔여 초(없으면 0),
             "error_kind": None | "minute" | "daily" | "other",
+            "news_mode": "live" | "stale_cache" | "rss_only" | "empty",
         }
     """
-    # 쿨다운 중이면 Gemini를 절대 다시 호출하지 않습니다.
+    # 쿨다운 중이면 Gemini를 절대 다시 호출하지 않고, 보관 뉴스/RSS로 대체합니다.
     remaining = get_news_fetch_cooldown_remaining()
     if remaining > 0 and _cooldown_state["error"]:
-        return {
-            "news": [],
-            "error": _cooldown_state["error"],
-            "cooldown_remaining": remaining,
-            "error_kind": _cooldown_state["kind"] or "minute",
-        }
+        return _fallback_news_payload(
+            error_message=_cooldown_state["error"],
+            error_kind=_cooldown_state["kind"] or "minute",
+            max_per_topic=max_per_topic,
+        )
 
     try:
         news = _cached_ai_translated_news(max_per_topic=max_per_topic)
-        # 성공하면 이전 쿨다운 잔여 상태를 정리합니다.
+        # 성공하면 장기 보관 + 쿨다운 해제
+        _save_last_good_news(news)
         clear_news_fetch_cooldown()
         return {
             "news": news,
             "error": None,
             "cooldown_remaining": 0,
             "error_kind": None,
+            "news_mode": "live",
         }
     except GeminiRateLimitError as exc:
         _activate_rate_limit_cooldown(exc)
-        return {
-            "news": [],
-            "error": str(exc) or _humanize_gemini_error(exc),
-            "cooldown_remaining": get_news_fetch_cooldown_remaining(),
-            "error_kind": exc.kind,
-        }
+        return _fallback_news_payload(
+            error_message=str(exc) or _humanize_gemini_error(exc),
+            error_kind=exc.kind,
+            max_per_topic=max_per_topic,
+        )
     except NewsFetchError as exc:
+        # 일반 실패도 가능하면 직전 성공 번역을 보여줍니다.
+        last_good = _load_last_good_news()
+        if last_good:
+            return {
+                "news": last_good,
+                "error": str(exc),
+                "cooldown_remaining": 0,
+                "error_kind": "other",
+                "news_mode": "stale_cache",
+            }
         return {
             "news": [],
             "error": str(exc),
             "cooldown_remaining": 0,
             "error_kind": "other",
+            "news_mode": "empty",
         }
     except Exception as exc:
         if _is_rate_limit_error(exc):
@@ -782,17 +908,26 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
                 kind="daily" if _is_daily_quota_error(exc) else "minute",
             )
             _activate_rate_limit_cooldown(rate_exc)
+            return _fallback_news_payload(
+                error_message=str(rate_exc),
+                error_kind=rate_exc.kind,
+                max_per_topic=max_per_topic,
+            )
+        last_good = _load_last_good_news()
+        if last_good:
             return {
-                "news": [],
-                "error": str(rate_exc),
-                "cooldown_remaining": get_news_fetch_cooldown_remaining(),
-                "error_kind": rate_exc.kind,
+                "news": last_good,
+                "error": _humanize_gemini_error(exc),
+                "cooldown_remaining": 0,
+                "error_kind": "other",
+                "news_mode": "stale_cache",
             }
         return {
             "news": [],
             "error": _humanize_gemini_error(exc),
             "cooldown_remaining": 0,
             "error_kind": "other",
+            "news_mode": "empty",
         }
 
 
