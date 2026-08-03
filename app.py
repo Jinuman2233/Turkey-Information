@@ -678,10 +678,11 @@ st.divider()
 render_section_title("📰 실시간 터키 뉴스 (AI 한국어 번역)")
 
 ai_ready = is_ai_translation_configured()
+news_mode = "empty"
 
 if ai_ready:
-    # fetch_ai_translated_news()는 성공한 결과만 6시간 캐시합니다.
-    # 429가 나면 쿨다운 동안 API를 다시 치지 않고 안내만 반환합니다.
+    # 성공 번역은 길게 캐시하고, 일일 한도/429 시에는
+    # 이전 번역 또는 RSS 원문으로 대체해 Gemini를 더 이상 호출하지 않습니다.
     try:
         news_result = fetch_ai_translated_news()
     except Exception:
@@ -691,33 +692,36 @@ if ai_ready:
             "error": API_RATE_LIMIT_MESSAGE,
             "cooldown_remaining": 0,
             "error_kind": "minute",
+            "news_mode": "empty",
         }
 
     news_list = news_result.get("news") or []
     news_error = news_result.get("error")
     error_kind = news_result.get("error_kind")
+    news_mode = news_result.get("news_mode") or ("live" if news_list else "empty")
     cooldown_remaining = int(news_result.get("cooldown_remaining") or 0)
 
-    if news_list:
-        is_dummy_news = False
-    else:
-        # API 키는 설정돼 있지만 수집/번역에 실패한 경우
-        error_text = str(news_error or "")
-        is_daily_quota = (
-            error_kind == "daily"
-            or error_text == API_DAILY_QUOTA_MESSAGE
-            or "일일 사용량" in error_text
-        )
-        is_rate_limit = (
-            error_kind == "minute"
-            or error_text == API_RATE_LIMIT_MESSAGE
-            or "API 처리 지연" in error_text
-            or "1분 후 새로고침" in error_text  # 이전 문구 호환
-        )
+    error_text = str(news_error or "")
+    is_daily_quota = (
+        error_kind == "daily"
+        or error_text == API_DAILY_QUOTA_MESSAGE
+        or "일일 사용량" in error_text
+    )
+    is_rate_limit = (
+        error_kind == "minute"
+        or error_text == API_RATE_LIMIT_MESSAGE
+        or "API 처리 지연" in error_text
+        or "1분 후 새로고침" in error_text
+    )
 
+    if news_error:
         if is_daily_quota:
-            # 일일 한도 — 1~3분 기다려도 해결되지 않습니다.
-            st.warning(f"⚠️ {API_DAILY_QUOTA_MESSAGE}")
+            mode_hint = ""
+            if news_mode == "stale_cache":
+                mode_hint = "\n\n📦 지금은 **이전에 번역해 둔 뉴스**를 보여드립니다. (추가 API 호출 없음)"
+            elif news_mode == "rss_only":
+                mode_hint = "\n\n📡 지금은 **Google News 원문 RSS**(미번역)를 보여드립니다. (추가 API 호출 없음)"
+            st.warning(f"⚠️ {API_DAILY_QUOTA_MESSAGE}{mode_hint}")
         elif is_rate_limit:
             wait_hint = (
                 f" (자동 재시도까지 약 {max(1, cooldown_remaining // 60)}분 남음)"
@@ -725,15 +729,13 @@ if ai_ready:
                 else ""
             )
             st.warning(f"⚠️ {API_RATE_LIMIT_MESSAGE}{wait_hint}")
-            # 쿨다운을 무시하고 강제로 다시 치려면 이 버튼을 사용합니다.
-            # (남발하면 다시 429/일일 한도에 걸릴 수 있습니다.)
             if st.button("지금 다시 시도", key="retry_gemini_news"):
                 clear_news_fetch_cooldown()
                 st.rerun()
         else:
             st.warning(
-                "⚠️ 실시간 뉴스를 가져오지 못했습니다. 우선 예시 데이터를 표시합니다.\n\n"
-                f"**원인:** {news_error or '알 수 없는 오류'}\n\n"
+                "⚠️ 실시간 뉴스 AI 번역에 문제가 있습니다.\n\n"
+                f"**원인:** {news_error}\n\n"
                 "**확인 체크리스트**\n"
                 "1. Streamlit Cloud → **App settings → Secrets** 에 아래가 있는지 확인\n"
                 '   `GEMINI_API_KEY = "AIza...실제키"`  (예시 값 your-gemini-api-key-here 이면 안 됨)\n'
@@ -741,6 +743,11 @@ if ai_ready:
                 "3. Google AI Studio(https://aistudio.google.com/apikey)에서 키가 유효한지 확인\n"
                 "4. 배포 후 `google-generativeai` 패키지가 설치되도록 requirements.txt가 main에 반영됐는지 확인"
             )
+
+    if news_list:
+        is_dummy_news = False
+    else:
+        # 보관 번역/RSS까지 모두 없을 때만 예시(더미)로 대체
         news_list = get_dummy_news()
         is_dummy_news = True
 else:
@@ -779,8 +786,16 @@ for news in news_list:
 
 if is_dummy_news:
     st.caption("⚠️ 현재 표시 중인 뉴스는 레이아웃 확인용 예시(더미) 데이터입니다.")
+elif news_mode == "stale_cache":
+    st.caption(
+        "데이터 출처: 이전에 성공한 Gemini 번역 캐시 (일일 한도/오류로 신규 번역 중단) · 추가 API 호출 없음"
+    )
+elif news_mode == "rss_only":
+    st.caption(
+        "데이터 출처: Google News RSS 원문 (AI 번역 한도 초과로 미번역) · 추가 API 호출 없음"
+    )
 else:
-    st.caption("데이터 출처: Google News RSS + Gemini 배치 번역 · 6시간마다 자동 갱신")
+    st.caption("데이터 출처: Google News RSS + Gemini 배치 번역 · 최대 12시간마다 자동 갱신")
 
 st.divider()
 
