@@ -536,16 +536,24 @@ st.divider()
 # =============================================================================
 # 5. 섹션 4 — 터키 최저임금 + 환율 환산
 # -----------------------------------------------------------------------------
-# modules/minimum_wage.py 에서 정의한 최저임금(TRY)을 위에서 이미 가져온
-# 환율 데이터(fx_rates)를 이용해 EUR / USD / KRW로 환산해서 함께 보여줍니다.
+# modules/minimum_wage.py 가 웹에서 최신 Gross Asgari Ücret을 자동 수집하고,
+# 위에서 가져온 환율(fx_rates)로 EUR / USD / KRW 환산까지 연결합니다.
 #
-# 5-1) 월 최저임금 : Gross(세전) 기준으로 표시
+# 5-1) 월 최저임금 : Gross(세전) 기준으로 표시 + 적용/발표일
 # 5-2) 시간당 최저임금 : Gross(세전) 기준으로 표시 (월 근무시간 255시간 기준)
 # =============================================================================
 render_section_title("💰 터키 최저임금 (Gross, 세전 기준)")
 
-wage_info = get_minimum_wage_info()
+# modules/minimum_wage.py 가 CSGB 등에서 최신 Gross Asgari Ücret을 자동 수집합니다.
+# (하루 1회 캐시, 실패 시 2026년 공식 기준 폴백)
+with st.spinner("최신 세전 최저임금(Gross Asgari Ücret)을 불러오는 중입니다..."):
+    wage_info = get_minimum_wage_info()
+
 gross_wage_try = wage_info["gross_wage_try"]
+effective_label = wage_info.get("effective_period") or (
+    f"적용/발표일: {wage_info.get('effective_year', 2026)}년 "
+    f"{int(wage_info.get('effective_month', 1)):02d}월"
+)
 
 # 환율을 이용해 '월 Gross 최저임금'을 외화로 환산합니다.
 gross_converted = convert_wage_to_foreign_currencies(gross_wage_try, fx_rates)
@@ -559,7 +567,7 @@ with wage_col1:
             f"<div class='big-number'>₺ {format_number(gross_wage_try, 0)}</div>",
             unsafe_allow_html=True,
         )
-        st.caption(f"적용 기간: {wage_info['effective_period']}")
+        st.caption(effective_label)
 
 with wage_col2:
     with st.container(border=True):
@@ -567,7 +575,7 @@ with wage_col2:
         eur_value = gross_converted["EUR"]
         display_value = f"€ {format_number(eur_value, 0)}" if eur_value else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
-        st.caption("현재 EUR/TRY 환율 기준")
+        st.caption(effective_label)
 
 with wage_col3:
     with st.container(border=True):
@@ -575,7 +583,7 @@ with wage_col3:
         usd_value = gross_converted["USD"]
         display_value = f"$ {format_number(usd_value, 0)}" if usd_value else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
-        st.caption("현재 USD/TRY 환율 기준")
+        st.caption(effective_label)
 
 with wage_col4:
     with st.container(border=True):
@@ -583,15 +591,18 @@ with wage_col4:
         krw_value = gross_converted["KRW"]
         display_value = f"₩ {format_number(krw_value, 0)}" if krw_value else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
-        st.caption("현재 TRY/KRW 환율 기준")
+        st.caption(effective_label)
 
-st.caption("⚠️ 최저임금 금액은 예시 기준 데이터이며, 최신 정부 발표 금액으로 업데이트가 필요합니다.")
+st.caption(
+    "데이터 출처: 터키 노동사회보장부(CSGB) Asgari Ücret 자동 수집 · 하루 1회 갱신 "
+    "(실패 시 TradingEconomics/현지 포털·2026년 공식 기준 폴백)"
+)
 
 # -----------------------------------------------------------------------------
-# 4-2) 시간당 최저임금 (Gross, 세전 기준)
+# 5-2) 시간당 최저임금 (Gross, 세전 기준)
 # -----------------------------------------------------------------------------
-# '월 Gross(세전) 최저임금'을 '월 근무시간(255시간)'으로 나누어 시간당 금액을 구하고,
-# 이를 동일한 방식으로 EUR / USD / KRW로 환산해서 보여줍니다.
+# 위에서 수집한 '월 Gross(세전) 최저임금'을 '월 근무시간(255시간)'으로 나누어
+# 시간당 금액을 구하고, 동일하게 EUR / USD / KRW로 환산합니다.
 # -----------------------------------------------------------------------------
 st.markdown(
     f"<div style='margin-top:0.8rem; font-weight:700;'>⏱️ 시간당 최저임금 "
@@ -611,7 +622,9 @@ with hourly_col1:
             f"<div class='big-number'>₺ {format_number(hourly_gross_wage_try, 2)}</div>",
             unsafe_allow_html=True,
         )
-        st.caption(f"월 {format_number(wage_info['gross_wage_try'], 0)} TRY ÷ {MONTHLY_WORKING_HOURS}시간")
+        st.caption(
+            f"월 {format_number(gross_wage_try, 0)} TRY ÷ {MONTHLY_WORKING_HOURS}시간 · {effective_label}"
+        )
 
 with hourly_col2:
     with st.container(border=True):
