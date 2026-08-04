@@ -18,7 +18,7 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
    - 카드 하단에 `적용/발표일: YYYY년 MM월` 표시 (실패 시 2026년 공식 기준 폴백)
 5. **실시간 터키 뉴스 + AI 한국어 번역** — 무역·관세 / 이민·비자 / 노무·노동조합 / 물류·인프라 /
    외투기업·제조업 규제, 5가지 주제의 최신 뉴스를 구글 뉴스(Google News RSS)에서 자동 수집하고,
-   **Google Gemini REST API**(`gemini-1.5-flash` → 실패 시 `gemini-1.5-flash-latest` → `gemini-pro`)를
+   **Google Gemini REST API**(`gemini-3.5-flash`)를
    **SDK 없이 `requests`로 직접 호출**해 한국어 번역·요약까지 자동으로 처리합니다.
    - 메인 화면에는 번역된 **한국어 제목만** 깔끔한 리스트로 표시됩니다.
    - 제목을 클릭(`st.expander`)하면 한국어 3줄 요약과 **원문 기사 링크**(새 창으로 열림)가 펼쳐집니다.
@@ -73,7 +73,7 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 (Streamlit Cloud에서 SDK 버전에 따라 발생하던 `404 model not found` 오류를 근본적으로 피하기 위함).
 
 - 엔드포인트: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}`
-- 모델 순서(404일 때만 다음으로 우회): `gemini-1.5-flash` → `gemini-1.5-flash-latest` → `gemini-pro`
+- 사용 모델: `gemini-3.5-flash`
 
 키 발급: [Google AI Studio](https://aistudio.google.com/apikey)
 
