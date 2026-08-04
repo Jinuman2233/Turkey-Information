@@ -658,9 +658,9 @@ st.divider()
 # 6. 섹션 5 — 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역)
 # -----------------------------------------------------------------------------
 # modules/news_crawler.py 에서 다음과 같은 순서로 뉴스를 준비해 옵니다.
-#   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
-#      이민·비자, 노무·노동조합, 물류·인프라, 외투기업·제조업 규제)의
-#      최근 30일(when:30d + datetime 컷오프) 기사만 수집 → 최신순 상위 N개
+#   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 자동차 산업
+#      (otomotiv / otomobil ihracatı / araç üretimi / TOGG 등) 기사를 수집
+#      → when:30d + Python datetime 이중 필터로 최근 30일만 유지 → 최신순 상위 N개
 #   2) Google Gemini REST API(gemini-3.5-flash)로 기사들을 배치(1~2회) 번역
 #   3) 결과를 12시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
 #
@@ -677,7 +677,7 @@ st.divider()
 #   - 한국어로 번역/요약된 기사 본문(3줄 요약)
 #   - 🔗 원문 기사로 이동하는 링크 (새 창에서 열림)
 # =============================================================================
-render_section_title("📰 실시간 터키 뉴스 (AI 한국어 번역)")
+render_section_title("📰 터키 자동차 산업 뉴스 (AI 한국어 번역)")
 
 ai_ready = is_ai_translation_configured()
 news_mode = "empty"
@@ -807,7 +807,10 @@ elif news_mode == "rss_only":
         "데이터 출처: Google News RSS 원문 (AI 번역 한도 초과로 미번역) · 추가 API 호출 없음"
     )
 else:
-    st.caption("데이터 출처: Google News RSS(최근 30일·최신순) + Gemini 배치 번역 · 최대 12시간마다 자동 갱신")
+    st.caption(
+        "데이터 출처: Google News RSS(터키 자동차 산업 · 최근 30일 · 최신순) "
+        "+ Gemini 배치 번역 · 최대 12시간마다 자동 갱신"
+    )
 
 st.divider()
 

@@ -4,9 +4,11 @@
 # 이 파일은 "실시간 터키 뉴스 자동 수집 + AI 한국어 번역" 기능을 담당합니다.
 #
 # 전체 흐름 (아래로 갈수록 더 구체적인 작업입니다):
-#   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 관련 기사 5개 주제를 수집
-#      - 검색 쿼리에 when:30d 를 붙여 최근 30일 이내 기사만 요청
-#      - datetime 기준 컷오프로 한 번 더 필터링 후, 최신 발행순으로 상위 N개만 사용
+#   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 '자동차 산업' 관련 기사를 수집
+#      - 튀르키예어 키워드(otomotiv, otomobil ihracatı, araç üretimi, TOGG 등)로 검색
+#      - 검색 쿼리 끝에 when:30d 를 붙여 최근 30일 이내 기사만 요청
+#      - ★ Python에서 발행일을 다시 파싱해 30일보다 오래된 기사는 과감하게 drop
+#      - 최신 발행순으로 상위 N개만 Gemini 번역에 전달
 #   2) 각 기사의 제목/요약(원문, 보통 영어 또는 터키어)을 정리
 #   3) Google Gemini REST API(https://generativelanguage.googleapis.com/v1beta/...)를
 #      requests로 "직접" 호출해 한국어로 번역 + 3줄 요약합니다.
@@ -52,8 +54,10 @@ import json
 import time
 import html as html_module
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import quote_plus
+from time import struct_time
 
 import requests
 import feedparser
@@ -75,45 +79,50 @@ except ImportError:
 
 
 # =============================================================================
-# 1. 뉴스 수집 대상 "5가지 주제" 정의
+# 1. 뉴스 수집 대상 — 터키 자동차 산업 (otomotiv) 중심
 # -----------------------------------------------------------------------------
-# 터키 현지에서 공장/사업장을 운영하는 한국 기업 입장에서 중요한 5가지 주제를
-# 미리 정의해 두고, 주제별로 구글 뉴스에서 검색할 영어 키워드를 지정합니다.
-# (구글 뉴스는 한국어보다 영어 키워드로 검색했을 때 더 다양한 국제 뉴스를 찾아줍니다.)
+# 사용자가 원하는 "자동차 산업" 뉴스를 집중 수집하기 위해,
+# 튀르키예어 키워드(otomotiv / otomobil / araç / TOGG 등)로 주제별 쿼리를 구성합니다.
+# Google News RSS에는 각 쿼리 끝에 when:30d 가 자동으로 붙습니다.
 # =============================================================================
 NEWS_TOPICS = [
     {
-        "key": "trade_customs",
-        "label_kr": "무역·관세",
-        "query": "Turkey trade OR Turkey customs OR Turkey tariff OR Turkey import export",
+        "key": "otomotiv_sanayi",
+        "label_kr": "자동차 산업",
+        "query": "Türkiye otomotiv sanayi OR otomotiv sanayi",
     },
     {
-        "key": "immigration_visa",
-        "label_kr": "이민·비자",
-        "query": "Turkey immigration OR Turkey work permit OR Turkey foreigner visa",
+        "key": "otomobil_ihracati",
+        "label_kr": "자동차 수출",
+        "query": "otomobil ihracatı OR otomotiv ihracat",
     },
     {
-        "key": "labor_union",
-        "label_kr": "노무·노동조합",
-        "query": "Turkey labor union OR Turkey strike OR Turkey employment law OR Turkey minimum wage",
+        "key": "arac_uretimi",
+        "label_kr": "차량 생산",
+        "query": "araç üretimi OR otomotiv üretimi OR otomobil üretimi",
     },
     {
-        "key": "logistics_infra",
-        "label_kr": "물류·인프라",
-        "query": "Turkey logistics OR Turkey port OR Turkey transportation infrastructure",
+        "key": "togg_ev",
+        "label_kr": "TOGG·전기차",
+        "query": "TOGG OR elektrikli otomobil OR elektrikli araç Türkiye",
     },
     {
-        "key": "manufacturing_regulation",
-        "label_kr": "외투기업·제조업 규제",
-        "query": "Turkey foreign investment OR Turkey manufacturing regulation",
+        "key": "otomotiv_yan_sanayi",
+        "label_kr": "자동차 부품·투자",
+        "query": "otomotiv yan sanayi OR otomotiv fabrika OR otomotiv yatırım",
     },
 ]
+
+# NewsAPI 등 외부 API에서 쓸 자동차 산업 기본 검색식
+NEWS_API_AUTOMOTIVE_QUERY = "(otomotiv OR araç OR otomobil OR TOGG)"
 
 # 한 번에 캐시가 갱신될 때 API 호출 비용을 통제하기 위한 기본값들입니다.
 # 최근 N일 이내 기사만 모은 뒤, 전역 최신순으로 상위 MAX_NEWS_FOR_TRANSLATION개만 Gemini에 전달합니다.
 NEWS_LOOKBACK_DAYS = 30  # 오늘 기준 최근 30일(하드코딩 날짜 금지 — datetime으로 동적 계산)
 DEFAULT_MAX_ARTICLES_PER_TOPIC = 5  # 주제당 후보 수집 상한(필터·정렬 전)
 MAX_NEWS_FOR_TRANSLATION = 8  # Gemini 번역으로 넘길 최신 뉴스 개수(5~10 권장 범위)
+# 주제/필터 로직이 바뀌면 캐시 키를 강제로 바꿔 예전(비자동차·오래된) 캐시를 쓰지 않습니다.
+NEWS_CACHE_VERSION = "automotive-30d-v2"
 CACHE_TTL_SECONDS = 60 * 60 * 12  # 12시간 (성공한 번역 결과 — 갱신 호출 자체를 줄임)
 BATCH_API_SLEEP_SECONDS = 4  # 배치를 2번 이상 나눠 호출할 때, 호출 사이 대기 시간(초)
 # ⚠️ 429가 난 뒤 새로고침할 때마다 API를 다시 치면, 제한이 더 오래가거나 일일 한도를
@@ -171,45 +180,60 @@ def _build_google_news_rss_url(
 ) -> str:
     """
     검색어(query)를 구글 뉴스 RSS 검색 URL로 바꿔줍니다.
-    검색어 끝에 when:{N}d 를 붙여 최근 N일 이내 기사만 요청합니다.
+    검색어 끝에 when:{N}d 를 공백으로 정확히 붙여 최근 N일만 요청합니다.
+    예: q=Türkiye+otomotiv+sanayi+when:30d
 
     Parameters
     ----------
     query : str
-        검색할 키워드 (예: "Turkey trade OR Turkey customs")
+        검색할 키워드 (예: "Türkiye otomotiv sanayi OR otomotiv sanayi")
     hl : str
         언어(host language) 설정. "tr" = 터키어
     gl : str
         지역(geo location) 설정. "TR" = 터키
-        -> hl/gl을 터키로 지정하면 "터키 지역 설정"으로 검색 결과가 필터링됩니다.
     lookback_days : int
         최근 며칠 이내 뉴스만 검색할지 (기본 30일)
     """
     time_filter = _google_news_time_filter_suffix(lookback_days)
+    cleaned = " ".join((query or "").split())
     # 이미 when: 옵션이 있으면 중복 추가하지 않습니다.
-    if "when:" not in query.lower():
-        query_with_time = f"{query} {time_filter}".strip()
+    if "when:" not in cleaned.lower():
+        query_with_time = f"{cleaned} {time_filter}".strip()
     else:
-        query_with_time = query.strip()
+        query_with_time = cleaned
     encoded_query = quote_plus(query_with_time)
     return f"https://news.google.com/rss/search?q={encoded_query}&hl={hl}&gl={gl}&ceid={gl}:{hl}"
 
 
-def _news_api_time_params(now: datetime | None = None) -> dict:
+def _news_api_search_params(now: datetime | None = None) -> dict:
     """
-    News API 등 `from`/`sortBy` 파라미터를 쓰는 외부 API용 헬퍼입니다.
-    (현재 수집 경로는 Google News RSS이지만, 동일 정책으로 맞출 때 사용합니다.)
+    News API 등 `q`/`from`/`sortBy` 파라미터를 쓰는 외부 API용 헬퍼입니다.
+    (현재 주 수집 경로는 Google News RSS이지만, 동일 정책으로 맞출 때 사용합니다.)
 
     Returns
     -------
     dict
-        {"from": "YYYY-MM-DD", "sortBy": "publishedAt"}
-        - from: 오늘 기준 30일 전 날짜
-        - sortBy: 발행일 기준 정렬
+        {
+          "q": "(otomotiv OR araç OR otomobil OR TOGG)",
+          "from": "YYYY-MM-DD",   # 오늘 기준 30일 전
+          "sortBy": "publishedAt",
+          "language": "tr",
+        }
     """
     reference = now if now is not None else datetime.now()
     from_date = _lookback_cutoff(reference).strftime("%Y-%m-%d")
-    return {"from": from_date, "sortBy": "publishedAt"}
+    return {
+        "q": NEWS_API_AUTOMOTIVE_QUERY,
+        "from": from_date,
+        "sortBy": "publishedAt",
+        "language": "tr",
+    }
+
+
+# 하위 호환 별칭 (이전 이름)
+def _news_api_time_params(now: datetime | None = None) -> dict:
+    """_news_api_search_params 의 하위 호환 래퍼."""
+    return _news_api_search_params(now)
 
 
 class _HTMLTagStripper(HTMLParser):
@@ -245,20 +269,104 @@ def _strip_html(raw_html: str) -> str:
     return " ".join(text.split())
 
 
+def _as_naive_datetime(dt: datetime) -> datetime:
+    """timezone-aware datetime을 naive(로컬)로 맞춰 비교가 깨지지 않게 합니다."""
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _parse_datetime_value(value) -> datetime | None:
+    """
+    RSS/API/캐시에서 오는 다양한 발행일 표현을 datetime으로 파싱합니다.
+    파싱 실패 시 None (→ 이후 필터에서 drop).
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return _as_naive_datetime(value)
+
+    if isinstance(value, struct_time):
+        try:
+            return datetime(*value[:6])
+        except Exception:
+            return None
+
+    # feedparser의 published_parsed는 보통 time.struct_time이지만
+    # 튜플/리스트로 들어오는 경우도 대비합니다.
+    if isinstance(value, (tuple, list)) and len(value) >= 6:
+        try:
+            return datetime(*[int(v) for v in value[:6]])
+        except Exception:
+            return None
+
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text or text in {"날짜 미상", "N/A", "n/a", "-"}:
+        return None
+
+    # ISO-8601 (published_at 저장 형식 포함)
+    iso_candidate = text.replace("Z", "+00:00")
+    try:
+        return _as_naive_datetime(datetime.fromisoformat(iso_candidate))
+    except Exception:
+        pass
+
+    # 흔한 표시/RSS 문자열 포맷
+    text_candidates = [text]
+    if len(text) >= 19:
+        text_candidates.append(text[:19])
+    if len(text) >= 16:
+        text_candidates.append(text[:16])
+    if len(text) >= 10:
+        text_candidates.append(text[:10])
+
+    for candidate in text_candidates:
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%d %b %Y %H:%M:%S",
+            "%d %b %Y",
+            "%b %d, %Y",
+            "%d.%m.%Y %H:%M",
+            "%d.%m.%Y",
+        ):
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+
+    # RFC 2822 등 (예: Mon, 04 Aug 2026 10:30:00 GMT)
+    try:
+        return _as_naive_datetime(parsedate_to_datetime(text))
+    except Exception:
+        return None
+
+
 def _entry_published_datetime(entry) -> datetime | None:
     """
     RSS entry에서 발행 시각을 datetime으로 파싱합니다.
-    published_parsed → updated_parsed 순으로 시도합니다.
+    published_parsed → updated_parsed → published/updated 문자열 순으로 시도합니다.
+    여러 값이 있으면 '더 오래된 쪽'을 채택합니다.
+    (재색인으로 updated만 최근인 오래된 기사를 걸러내기 위함)
     """
+    candidates = []
     for key in ("published_parsed", "updated_parsed"):
-        parsed_time = entry.get(key)
-        if not parsed_time:
-            continue
-        try:
-            return datetime(*parsed_time[:6])
-        except Exception:
-            continue
-    return None
+        parsed = _parse_datetime_value(entry.get(key))
+        if parsed is not None:
+            candidates.append(parsed)
+    for key in ("published", "updated"):
+        parsed = _parse_datetime_value(entry.get(key))
+        if parsed is not None:
+            candidates.append(parsed)
+
+    if not candidates:
+        return None
+    return min(candidates)
 
 
 def _format_published_date(entry) -> str:
@@ -271,27 +379,79 @@ def _format_published_date(entry) -> str:
         if dt.hour or dt.minute or dt.second:
             return dt.strftime("%Y-%m-%d %H:%M")
         return dt.strftime("%Y-%m-%d")
-
-    published = (entry.get("published") or entry.get("updated") or "").strip()
-    if published:
-        return published[:16] if len(published) >= 16 else published[:10]
     return "날짜 미상"
 
 
 def _is_within_lookback(published_at: datetime | None, now: datetime | None = None) -> bool:
-    """발행 시각이 오늘 기준 최근 NEWS_LOOKBACK_DAYS일 이내인지 판별합니다."""
+    """
+    발행 시각이 오늘 기준 최근 NEWS_LOOKBACK_DAYS일 이내인지 판별합니다.
+    발행일이 없거나 컷오프보다 과거면 False (반드시 drop 대상).
+    """
     if published_at is None:
         return False
-    return published_at >= _lookback_cutoff(now)
+    reference = now if now is not None else datetime.now()
+    cutoff = reference - timedelta(days=NEWS_LOOKBACK_DAYS)
+    # 미래로 너무 튀는 이상값도 제외 (시계/파싱 오류 방어)
+    if published_at > reference + timedelta(days=1):
+        return False
+    return published_at >= cutoff
+
+
+def _news_item_published_datetime(item: dict) -> datetime | None:
+    """수집/번역된 뉴스 dict에서 발행 시각을 꺼냅니다."""
+    if not isinstance(item, dict):
+        return None
+    for key in ("published_at", "date", "published", "publishedAt"):
+        parsed = _parse_datetime_value(item.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _drop_news_older_than_lookback(news_list: list, now: datetime | None = None) -> list:
+    """
+    ★ 핵심 이중 필터: API/RSS가 오래된 기사를 잘못 섞어 줘도
+    Python에서 발행일을 다시 검사해 30일보다 과거인 항목은 과감하게 삭제합니다.
+    발행일을 파싱할 수 없는 항목도 삭제합니다.
+    """
+    reference = now if now is not None else datetime.now()
+    kept = []
+    for item in news_list or []:
+        published_at = _news_item_published_datetime(item)
+        if _is_within_lookback(published_at, now=reference):
+            # 정렬/재필터용으로 published_at을 항상 정규화해 둡니다.
+            normalized = dict(item)
+            normalized["published_at"] = published_at.isoformat(timespec="seconds")
+            if not normalized.get("date") or normalized.get("date") == "날짜 미상":
+                if published_at.hour or published_at.minute or published_at.second:
+                    normalized["date"] = published_at.strftime("%Y-%m-%d %H:%M")
+                else:
+                    normalized["date"] = published_at.strftime("%Y-%m-%d")
+            kept.append(normalized)
+    return kept
 
 
 def _sort_news_newest_first(news_list: list) -> list:
     """수집된 뉴스를 발행 시각 내림차순(최신순)으로 정렬합니다."""
     return sorted(
         news_list,
-        key=lambda item: item.get("published_at") or item.get("date") or "",
+        key=lambda item: item.get("published_at")
+        or item.get("date")
+        or "",
         reverse=True,
     )
+
+
+def _finalize_news_list(news_list: list, max_total: int | None = None, now: datetime | None = None) -> list:
+    """
+    수집 결과를 최종 형태로 정리합니다.
+    1) 30일 초과 drop  2) 링크 중복 제거  3) 최신순 정렬  4) 상위 N개
+    """
+    filtered = _drop_news_older_than_lookback(news_list, now=now)
+    unique = _dedupe_news_by_link(_sort_news_newest_first(filtered))
+    if max_total is None:
+        return unique
+    return unique[:max_total]
 
 
 def _dedupe_news_by_link(news_list: list) -> list:
@@ -299,7 +459,9 @@ def _dedupe_news_by_link(news_list: list) -> list:
     seen = set()
     unique = []
     for item in news_list:
-        key = (item.get("link") or "").strip() or (item.get("title_original") or "").strip()
+        key = (item.get("link") or "").strip() or (
+            item.get("title_original") or item.get("title_kr") or ""
+        ).strip()
         if not key or key in seen:
             continue
         seen.add(key)
@@ -338,18 +500,18 @@ def collect_raw_news_for_topic(
     query: str,
     max_results: int = DEFAULT_MAX_ARTICLES_PER_TOPIC,
     as_of_date: str = "",
+    cache_version: str = NEWS_CACHE_VERSION,
 ):
     """
     주제 1개에 대해 구글 뉴스 RSS를 조회하고, 번역하기 전 '원문 그대로'의
     기사 정보를 정리해서 리스트로 반환합니다.
 
     - Google News 검색에 when:30d 를 붙여 최근 30일 기사만 요청
-    - 파싱된 발행일로 한 번 더 필터링 (오늘 기준 동적 컷오프)
+    - ★ 파싱된 발행일로 Python에서 한 번 더 필터링 (30일 초과는 drop)
     - 최신 발행순으로 정렬 후 상위 max_results개만 반환
 
-    as_of_date:
-        캐시 키에 '오늘 날짜'를 넣어, 날짜가 바뀌면 30일 컷오프가 갱신되도록 합니다.
-        호출 측에서 datetime.now().strftime("%Y-%m-%d")를 넘깁니다.
+    as_of_date / cache_version:
+        캐시 키에 날짜·버전을 넣어 오래된/이전 주제 캐시가 재사용되지 않게 합니다.
 
     반환되는 각 항목의 형태:
         {
@@ -361,8 +523,8 @@ def collect_raw_news_for_topic(
             "published_at": "ISO 발행 시각 (정렬용)",
         }
     """
-    # 캐시 키가 날짜별로 갈라지도록 as_of_date를 함수 인자로 받습니다.
-    _ = as_of_date  # 캐시 버스트용 (의도적으로 본문에서 직접 쓰지는 않음)
+    # 캐시 버스트용 인자 (본문 로직에는 직접 쓰지 않음)
+    _ = (as_of_date, cache_version)
 
     now = datetime.now()
     url = _build_google_news_rss_url(query, lookback_days=NEWS_LOOKBACK_DAYS)
@@ -371,8 +533,8 @@ def collect_raw_news_for_topic(
     results = []
     for entry in entries:
         published_at = _entry_published_datetime(entry)
+        # ★ RSS가 when:30d를 무시하고 오래된 기사를 줘도 Python에서 즉시 drop
         if not _is_within_lookback(published_at, now=now):
-            # 발행일이 없거나 30일을 넘긴 기사는 수집하지 않습니다.
             continue
 
         source_name = entry.get("source", {}).get("title", "") or "Google News"
@@ -395,8 +557,8 @@ def collect_raw_news_for_topic(
             }
         )
 
-    results = _sort_news_newest_first(results)
-    return results[:max_results]
+    # 주제 단위에서도 한 번 더 drop → 최신순 → 상위 N
+    return _finalize_news_list(results, max_total=max_results, now=now)
 
 
 def collect_all_raw_news(
@@ -404,9 +566,9 @@ def collect_all_raw_news(
     max_total: int = MAX_NEWS_FOR_TRANSLATION,
 ):
     """
-    NEWS_TOPICS에 정의된 5가지 주제를 모두 순회하면서 원문 기사를 수집하고,
+    NEWS_TOPICS(자동차 산업)를 모두 순회하면서 원문 기사를 수집하고,
     각 기사에 "category"(한글 주제명)를 붙인 뒤,
-    전역 최신순 정렬 → 중복 제거 → 상위 max_total개만 반환합니다.
+    ★ 30일 초과 drop → 중복 제거 → 전역 최신순 → 상위 max_total개만 반환합니다.
     (이 상위 N개만 Gemini 번역 함수로 전달됩니다.)
     """
     as_of_date = datetime.now().strftime("%Y-%m-%d")
@@ -417,14 +579,15 @@ def collect_all_raw_news(
             topic["query"],
             max_per_topic,
             as_of_date=as_of_date,
+            cache_version=NEWS_CACHE_VERSION,
         )
         for item in topic_news:
             item_with_category = dict(item)
             item_with_category["category"] = topic["label_kr"]
             all_news.append(item_with_category)
 
-    all_news = _dedupe_news_by_link(_sort_news_newest_first(all_news))
-    return all_news[:max_total]
+    # ★ 전역 이중 필터: 주제별 캐시/병합 과정에서 섞인 오래된 기사도 최종 drop
+    return _finalize_news_list(all_news, max_total=max_total)
 
 
 # =============================================================================
@@ -950,10 +1113,16 @@ def _save_last_good_news(news: list) -> None:
 
 
 def _load_last_good_news() -> list:
-    """보관 중인 마지막 성공 번역을 반환합니다. 없으면 빈 리스트."""
+    """
+    보관 중인 마지막 성공 번역을 반환합니다.
+    ★ 반환 직전에도 30일 초과 기사를 drop해, 예전 캐시에 2012/2월 기사가
+    남아 있어도 화면에 나오지 않게 합니다.
+    """
     store = _last_good_news_store()
     news = store.get("news") or []
-    return list(news) if news else []
+    if not news:
+        return []
+    return _finalize_news_list(list(news), max_total=MAX_NEWS_FOR_TRANSLATION)
 
 
 def _raw_news_as_display_items(raw_news_list: list) -> list:
@@ -961,8 +1130,10 @@ def _raw_news_as_display_items(raw_news_list: list) -> list:
     Gemini 없이 RSS 원문만으로 화면 표시용 항목을 만듭니다.
     일일 한도 초과 시에도 '가짜 더미' 대신 실제 최신 기사 링크를 보여줍니다.
     """
+    # 표시 직전에도 한 번 더 30일 필터(이중 방어)
+    filtered = _finalize_news_list(raw_news_list, max_total=MAX_NEWS_FOR_TRANSLATION)
     display_items = []
-    for raw in raw_news_list:
+    for raw in filtered:
         title = (raw.get("title_original") or "").strip() or "(제목 없음)"
         summary = (raw.get("summary_original") or "").strip()
         summary_lines = []
@@ -982,6 +1153,7 @@ def _raw_news_as_display_items(raw_news_list: list) -> list:
                 "link": raw.get("link", ""),
                 "source": raw.get("source", "Google News"),
                 "date": raw.get("date", ""),
+                "published_at": raw.get("published_at", ""),
             }
         )
     return display_items
@@ -999,7 +1171,7 @@ def _rss_only_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC) -> list:
 def _fallback_news_payload(error_message: str, error_kind: str, max_per_topic: int) -> dict:
     """
     Gemini 실패/쿨다운 시 사용할 대체 뉴스 payload.
-    우선순위: 마지막 성공 번역 → RSS 원문 → 빈 목록(앱에서 더미로 대체).
+    우선순위: 마지막 성공 번역(30일 재필터) → RSS 원문 → 빈 목록(앱에서 더미로 대체).
     """
     last_good = _load_last_good_news()
     if last_good:
@@ -1033,17 +1205,21 @@ def _fallback_news_payload(error_message: str, error_kind: str, max_per_topic: i
 # =============================================================================
 # 4. 최종 공개 함수 — app.py에서는 fetch_ai_translated_news()를 호출하면 됩니다.
 # -----------------------------------------------------------------------------
-# 성공한 번역 결과만 @st.cache_data(ttl=21600, 6시간)으로 캐시합니다.
+# 성공한 번역 결과만 @st.cache_data(ttl=12시간)으로 캐시합니다.
 # 429/일일 한도 실패는 예외로 올리되, fetch 단계에서 쿨다운을 걸어
 # 새로고침해도 Gemini를 다시 호출하지 않습니다.
 # 번역은 기사별 개별 호출이 아니라 배치 1~2회로 RPM 제한을 피합니다.
 # =============================================================================
 @st.cache_data(
-    ttl=CACHE_TTL_SECONDS,  # 6시간 = 21600초
-    show_spinner="최신 터키 뉴스를 수집하고 Gemini로 한 번에 번역하는 중입니다...",
+    ttl=CACHE_TTL_SECONDS,
+    show_spinner="터키 자동차 산업 뉴스를 수집하고 Gemini로 번역하는 중입니다...",
 )
-def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
+def _cached_ai_translated_news(
+    max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC,
+    cache_version: str = NEWS_CACHE_VERSION,
+):
     """성공한 뉴스 리스트만 캐시합니다. 실패 시 NewsFetchError를 발생시킵니다."""
+    _ = cache_version  # 주제/필터 변경 시 캐시 강제 갱신
     try:
         api_key = _get_gemini_api_key()
         if not api_key:
@@ -1052,9 +1228,11 @@ def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOP
             )
 
         raw_news_list = collect_all_raw_news(max_per_topic=max_per_topic)
+        # ★ 번역 직전 최종 이중 필터: 진짜 한 달 이내 + 최신순만 Gemini로 전달
+        raw_news_list = _finalize_news_list(raw_news_list, max_total=MAX_NEWS_FOR_TRANSLATION)
         if not raw_news_list:
             raise NewsFetchError(
-                "구글 뉴스 RSS에서 기사를 가져오지 못했습니다. "
+                "최근 30일 이내의 터키 자동차 산업 기사를 구글 뉴스 RSS에서 찾지 못했습니다. "
                 "네트워크/방화벽 문제이거나 Google News RSS 접근이 차단되었을 수 있습니다."
             )
 
@@ -1071,9 +1249,12 @@ def _cached_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOP
                     "link": raw["link"],
                     "source": raw["source"],
                     "date": raw["date"],
+                    "published_at": raw.get("published_at", ""),
                 }
             )
 
+        # 번역 후에도 날짜 기준으로 한 번 더 정리(캐시/이상값 방어)
+        translated_news = _finalize_news_list(translated_news, max_total=MAX_NEWS_FOR_TRANSLATION)
         if not translated_news:
             raise NewsFetchError("번역된 뉴스 결과가 비어 있습니다.")
 
@@ -1116,7 +1297,12 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
         )
 
     try:
-        news = _cached_ai_translated_news(max_per_topic=max_per_topic)
+        news = _cached_ai_translated_news(
+            max_per_topic=max_per_topic,
+            cache_version=NEWS_CACHE_VERSION,
+        )
+        # 성공해도 반환 직전 한 번 더 30일 필터(캐시된 이상값 방어)
+        news = _finalize_news_list(news, max_total=MAX_NEWS_FOR_TRANSLATION)
         # 성공하면 장기 보관 + 쿨다운 해제
         _save_last_good_news(news)
         clear_news_fetch_cooldown()
