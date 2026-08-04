@@ -660,9 +660,9 @@ st.divider()
 # modules/news_crawler.py 에서 다음과 같은 순서로 뉴스를 준비해 옵니다.
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
 #      이민·비자, 노무·노동조합, 물류·인프라, 외투기업·제조업 규제)의
-#      최신 기사를 수집
+#      최근 30일(when:30d + datetime 컷오프) 기사만 수집 → 최신순 상위 N개
 #   2) Google Gemini REST API(gemini-3.5-flash)로 기사들을 배치(1~2회) 번역
-#   3) 결과를 6시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
+#   3) 결과를 12시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
 #
 # API 키가 설정되어 있지 않거나(테스트 환경 등) 네트워크/번역에 실패하면,
 # modules/news_data.py 의 더미 데이터로 자동 대체(fallback)해서 화면이
@@ -673,6 +673,7 @@ st.divider()
 #   - '한국어로 번역된 기사 제목' 목록만 깔끔하게 보여줍니다 (st.expander의
 #     접힌 상태 라벨을 제목으로 사용).
 # [제목을 클릭해서 펼쳤을 때(expander 내부) UI]
+#   - 카테고리 · 발행 일시(Published Date) · 출처
 #   - 한국어로 번역/요약된 기사 본문(3줄 요약)
 #   - 🔗 원문 기사로 이동하는 링크 (새 창에서 열림)
 # =============================================================================
@@ -779,7 +780,7 @@ for news in news_list:
         # 펼쳤을 때 맨 위에 카테고리·날짜·출처를 작은 글씨로 보여줍니다.
         st.markdown(
             f"<span class='news-badge'>{news['category']}</span> "
-            f"<span class='small-caption'>{news['date']} · {news['source']}</span>",
+            f"<span class='small-caption'>발행 일시 (Published): {news.get('date', '날짜 미상')} · {news.get('source', '')}</span>",
             unsafe_allow_html=True,
         )
 
@@ -806,7 +807,7 @@ elif news_mode == "rss_only":
         "데이터 출처: Google News RSS 원문 (AI 번역 한도 초과로 미번역) · 추가 API 호출 없음"
     )
 else:
-    st.caption("데이터 출처: Google News RSS + Gemini 배치 번역 · 최대 12시간마다 자동 갱신")
+    st.caption("데이터 출처: Google News RSS(최근 30일·최신순) + Gemini 배치 번역 · 최대 12시간마다 자동 갱신")
 
 st.divider()
 

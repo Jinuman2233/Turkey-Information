@@ -18,7 +18,7 @@
 #   - title_tr      : 터키어 원문 제목 (예시)
 #   - content_tr    : 터키어 원문 기사 내용 (예시, 더미 텍스트)
 #   - source        : 출처 (예시)
-#   - date          : 발행일 (예시)
+#   - date          : 발행 일시 (오늘 기준 상대일 — 하드코딩 고정일 금지)
 #   - link          : 원문 기사 링크 (예시 데이터라 실제 기사는 없으므로, 터키어 제목으로
 #                     검색되는 구글 검색 링크를 대신 넣어 둡니다)
 #
@@ -28,7 +28,13 @@
 #   어떤 것을 받아도 수정 없이 그대로 동작합니다.
 # =============================================================================
 
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
+
+
+def _relative_date(days_ago: int) -> str:
+    """오늘 기준으로 N일 전 날짜를 YYYY-MM-DD로 반환합니다 (하드코딩 날짜 금지)."""
+    return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
 
 
 DUMMY_NEWS = [
@@ -52,7 +58,7 @@ DUMMY_NEWS = [
             "(※ 이 기사는 화면 레이아웃 확인을 위한 예시 더미 텍스트입니다.)"
         ),
         "source": "예시 통신사 (Örnek Haber Ajansı)",
-        "date": "2026-07-20",
+        "date": _relative_date(2),
     },
     {
         "category": "최저임금",
@@ -74,7 +80,7 @@ DUMMY_NEWS = [
             "(※ 이 기사는 화면 레이아웃 확인을 위한 예시 더미 텍스트입니다.)"
         ),
         "source": "예시 경제신문 (Örnek Ekonomi Gazetesi)",
-        "date": "2026-07-18",
+        "date": _relative_date(5),
     },
     {
         "category": "노조",
@@ -96,7 +102,7 @@ DUMMY_NEWS = [
             "(※ 이 기사는 화면 레이아웃 확인을 위한 예시 더미 텍스트입니다.)"
         ),
         "source": "예시 노동뉴스 (Örnek Emek Haber)",
-        "date": "2026-07-15",
+        "date": _relative_date(9),
     },
     {
         "category": "무역",
@@ -118,7 +124,7 @@ DUMMY_NEWS = [
             "(※ 이 기사는 화면 레이아웃 확인을 위한 예시 더미 텍스트입니다.)"
         ),
         "source": "예시 무역저널 (Örnek Ticaret Dergisi)",
-        "date": "2026-07-10",
+        "date": _relative_date(14),
     },
     {
         "category": "관세",
@@ -140,7 +146,7 @@ DUMMY_NEWS = [
             "(※ 이 기사는 화면 레이아웃 확인을 위한 예시 더미 텍스트입니다.)"
         ),
         "source": "예시 국제경제뉴스 (Örnek Uluslararası Ekonomi Haberleri)",
-        "date": "2026-07-05",
+        "date": _relative_date(21),
     },
 ]
 
@@ -156,5 +162,13 @@ def get_dummy_news() -> list:
     더미(임시) 뉴스 데이터 리스트를 반환합니다.
     실제 뉴스 API로 교체할 때는 이 함수의 반환값만
     동일한 구조(list of dict)로 바꿔주면 됩니다.
+    발행일은 호출 시점 기준 상대일로 다시 채워 최신성을 유지합니다.
     """
-    return DUMMY_NEWS
+    # 모듈 import 시점에 고정된 date를 호출 시점 기준으로 갱신
+    refreshed = []
+    day_offsets = (2, 5, 9, 14, 21)
+    for item, days_ago in zip(DUMMY_NEWS, day_offsets):
+        copy = dict(item)
+        copy["date"] = _relative_date(days_ago)
+        refreshed.append(copy)
+    return refreshed
