@@ -122,8 +122,11 @@ NEWS_LOOKBACK_DAYS = 30  # 오늘 기준 최근 30일(하드코딩 날짜 금지
 DEFAULT_MAX_ARTICLES_PER_TOPIC = 5  # 주제당 후보 수집 상한(필터·정렬 전)
 MAX_NEWS_FOR_TRANSLATION = 8  # Gemini 번역으로 넘길 최신 뉴스 개수(5~10 권장 범위)
 # 주제/필터 로직이 바뀌면 캐시 키를 강제로 바꿔 예전(비자동차·오래된) 캐시를 쓰지 않습니다.
-NEWS_CACHE_VERSION = "automotive-30d-v2"
-CACHE_TTL_SECONDS = 60 * 60 * 12  # 12시간 (성공한 번역 결과 — 갱신 호출 자체를 줄임)
+NEWS_CACHE_VERSION = "automotive-30d-v3"
+# 최신 뉴스가 빨리 반영되도록 번역 캐시는 1시간으로 둡니다.
+CACHE_TTL_SECONDS = 60 * 60  # 1시간
+# RSS 원문 수집 캐시(주제별) — 번역 캐시보다 짧게 유지해 최신 기사 유입을 돕습니다.
+RSS_CACHE_TTL_SECONDS = 30 * 60  # 30분
 BATCH_API_SLEEP_SECONDS = 4  # 배치를 2번 이상 나눠 호출할 때, 호출 사이 대기 시간(초)
 # ⚠️ 429가 난 뒤 새로고침할 때마다 API를 다시 치면, 제한이 더 오래가거나 일일 한도를
 # 더 빨리 소진합니다. 그래서 429 결과는 아래 쿨다운 시간 동안 재호출하지 않습니다.
@@ -494,7 +497,7 @@ def _fetch_rss_entries(url: str, timeout: int = 10):
         return []
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=RSS_CACHE_TTL_SECONDS, show_spinner=False)
 def collect_raw_news_for_topic(
     topic_key: str,
     query: str,
@@ -1099,30 +1102,65 @@ def _last_good_news_store() -> dict:
     """
     프로세스 수명 동안 마지막 성공 번역을 보관합니다.
     일일 한도/429가 나도 이전에 받아 둔 한국어 뉴스를 계속 보여주기 위함입니다.
+    cache_version이 바뀌면(주제/필터 개편) 예전 무역·비자 등 캐시는 무시합니다.
     """
-    return {"news": [], "saved_at": 0.0}
+    return {"news": [], "saved_at": 0.0, "cache_version": ""}
 
 
 def _save_last_good_news(news: list) -> None:
     """성공한 번역 결과를 장기 보관 저장소에 넣습니다."""
     if not news:
         return
+    # 저장 전에도 30일 필터를 통과한 것만 보관
+    cleaned = _finalize_news_list(list(news), max_total=MAX_NEWS_FOR_TRANSLATION)
+    if not cleaned:
+        return
     store = _last_good_news_store()
-    store["news"] = list(news)
+    store["news"] = cleaned
     store["saved_at"] = time.time()
+    store["cache_version"] = NEWS_CACHE_VERSION
 
 
 def _load_last_good_news() -> list:
     """
     보관 중인 마지막 성공 번역을 반환합니다.
-    ★ 반환 직전에도 30일 초과 기사를 drop해, 예전 캐시에 2012/2월 기사가
-    남아 있어도 화면에 나오지 않게 합니다.
+    - cache_version 불일치(예전 주제/필터) → 전부 폐기
+    - 30일 초과 기사 → drop
     """
     store = _last_good_news_store()
+    if store.get("cache_version") != NEWS_CACHE_VERSION:
+        # 예전(무역·비자 등) 캐시가 화면에 다시 뜨지 않도록 비웁니다.
+        store["news"] = []
+        store["cache_version"] = NEWS_CACHE_VERSION
+        return []
     news = store.get("news") or []
     if not news:
         return []
     return _finalize_news_list(list(news), max_total=MAX_NEWS_FOR_TRANSLATION)
+
+
+def filter_display_news_recent(news_list: list) -> list:
+    """
+    app.py 표시 직전 최종 안전망.
+    발행일이 없거나 최근 30일을 넘는 기사는 무조건 제거한 뒤 최신순으로 반환합니다.
+    """
+    return _finalize_news_list(news_list or [], max_total=MAX_NEWS_FOR_TRANSLATION)
+
+
+def clear_news_data_caches() -> None:
+    """Streamlit 뉴스 관련 @st.cache_data 캐시를 비워 강제 재수집합니다."""
+    try:
+        collect_raw_news_for_topic.clear()
+    except Exception:
+        pass
+    try:
+        _cached_ai_translated_news.clear()
+    except Exception:
+        pass
+    store = _last_good_news_store()
+    store["news"] = []
+    store["saved_at"] = 0.0
+    store["cache_version"] = NEWS_CACHE_VERSION
 
 
 def _raw_news_as_display_items(raw_news_list: list) -> list:

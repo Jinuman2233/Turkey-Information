@@ -47,8 +47,10 @@ from modules.news_crawler import (
     API_DAILY_QUOTA_MESSAGE,
     API_RATE_LIMIT_MESSAGE,
     API_TRANSLATION_BUSY_MESSAGE,
+    clear_news_data_caches,
     clear_news_fetch_cooldown,
     fetch_ai_translated_news,
+    filter_display_news_recent,
     is_ai_translation_configured,
 )
 
@@ -679,12 +681,20 @@ st.divider()
 # =============================================================================
 render_section_title("📰 터키 자동차 산업 뉴스 (AI 한국어 번역)")
 
+# 사용자가 강제 새로고침하면 캐시·이전 번역을 비우고 다시 수집합니다.
+refresh_col1, refresh_col2 = st.columns([3, 1])
+with refresh_col2:
+    if st.button("🔄 최신 뉴스 새로고침", key="refresh_automotive_news"):
+        clear_news_fetch_cooldown()
+        clear_news_data_caches()
+        st.rerun()
+
 ai_ready = is_ai_translation_configured()
 news_mode = "empty"
 
 if ai_ready:
-    # 성공 번역은 길게 캐시하고, 일일 한도/429 시에는
-    # 이전 번역 또는 RSS 원문으로 대체해 Gemini를 더 이상 호출하지 않습니다.
+    # 성공 번역은 캐시하고, 일일 한도/429 시에는
+    # 이전 번역(버전·30일 통과분) 또는 RSS 원문으로 대체합니다.
     try:
         news_result = fetch_ai_translated_news()
     except Exception:
@@ -737,6 +747,7 @@ if ai_ready:
             st.warning(f"⚠️ {API_RATE_LIMIT_MESSAGE}{wait_hint}")
             if st.button("지금 다시 시도", key="retry_gemini_news"):
                 clear_news_fetch_cooldown()
+                clear_news_data_caches()
                 st.rerun()
         elif is_translation_busy:
             # 모델 404/일시 통신 오류 — 짧은 한글 안내.
@@ -756,6 +767,9 @@ if ai_ready:
                 "4. 위쪽에 표시된 [디버그] Gemini REST API 오류 메시지에서 정확한 원인(HTTP 코드/응답 본문)을 확인"
             )
 
+    # ★ 화면 표시 직전 최종 30일 필터 (캐시/이상값으로 오래된 기사가 절대 안 뜨게)
+    news_list = filter_display_news_recent(news_list)
+
     if news_list:
         is_dummy_news = False
     else:
@@ -770,6 +784,12 @@ else:
         "Streamlit Cloud: App settings → Secrets 에 "
         '`GEMINI_API_KEY = "AIza..."` 를 추가한 뒤 **Reboot** 해 주세요.'
     )
+    news_list = get_dummy_news()
+    is_dummy_news = True
+
+# 더미도 상대일이지만, 표시 전 한 번 더 30일 필터를 통과시킵니다.
+news_list = filter_display_news_recent(news_list) if not is_dummy_news else news_list
+if not news_list and not is_dummy_news:
     news_list = get_dummy_news()
     is_dummy_news = True
 
@@ -809,7 +829,7 @@ elif news_mode == "rss_only":
 else:
     st.caption(
         "데이터 출처: Google News RSS(터키 자동차 산업 · 최근 30일 · 최신순) "
-        "+ Gemini 배치 번역 · 최대 12시간마다 자동 갱신"
+        "+ Gemini 배치 번역 · 최대 1시간마다 자동 갱신 · '최신 뉴스 새로고침'으로 즉시 재수집"
     )
 
 st.divider()
