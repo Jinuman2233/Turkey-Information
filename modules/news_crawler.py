@@ -67,9 +67,9 @@ except ImportError:
     pass
 
 # ⚠️ google-generativeai SDK는 더 이상 사용하지 않습니다.
-# Streamlit Cloud 환경에서 SDK 버전에 따라 "404 models/gemini-1.5-flash is not found"
-# 같은 모델 인식 오류가 반복적으로 발생해, Gemini REST API를 requests로 직접
-# 호출하는 방식으로 전환했습니다. (아래 "3. AI 번역/요약" 섹션 참고)
+# Streamlit Cloud 환경에서 SDK 버전에 따라 모델 인식 오류(404)가 반복적으로
+# 발생해, Gemini REST API를 requests로 직접 호출하는 방식으로 전환했습니다.
+# (아래 "3. AI 번역/요약" 섹션 참고)
 
 
 # =============================================================================
@@ -302,24 +302,13 @@ def collect_all_raw_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC):
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_REQUEST_TIMEOUT_SECONDS = 30
 
-# 우선 사용할 모델. 404(모델 없음)일 때만 다음 후보로 넘어갑니다.
-# (429/일일 한도에서는 절대 폴백하지 않아 요청 수를 늘리지 않습니다.)
-GEMINI_MODEL_NAME = "gemini-1.5-flash"
+# 사용 모델: gemini-3.5-flash (구형 1.5-flash / flash-latest / pro 대체)
+GEMINI_MODEL_NAME = "gemini-3.5-flash"
 GEMINI_MODEL_CANDIDATES = (
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-pro",  # 구형이지만 계정에서 비교적 안정적으로 남는 최종 우회 모델
+    "gemini-3.5-flash",
 )
-# gemini-pro(1.0) 계열은 systemInstruction / response_mime_type(JSON) 미지원인
-# 경우가 있어, 시스템 지시문을 본문에 합쳐서 단순한 형태로 요청합니다.
-_LEGACY_GEMINI_MODELS = frozenset(
-    {
-        "gemini-pro",
-        "models/gemini-pro",
-        "gemini-1.0-pro",
-        "models/gemini-1.0-pro",
-    }
-)
+# 구형(gemini-pro 등) 전용 호출 경로. 현재는 3.5-flash만 사용하므로 비워 둡니다.
+_LEGACY_GEMINI_MODELS = frozenset()
 
 # 예시 파일에 들어 있는 자리표시자 값. 이런 값이 secrets에 있으면
 # "키가 설정된 것처럼" 보이지만 실제 API 호출은 실패합니다.
@@ -422,10 +411,10 @@ def _build_gemini_rest_payload(model_name: str, user_prompt: str) -> dict:
     """
     Gemini REST API(generateContent) 요청 본문을 만듭니다.
 
-    - gemini-1.5 계열: systemInstruction + response_mime_type(JSON)을 사용해
+    - gemini-3.5-flash: systemInstruction + response_mime_type(JSON)을 사용해
       번역 지시와 사용자 프롬프트를 분리합니다.
-    - gemini-pro(1.0) 등 구형 모델: systemInstruction/JSON mime을 지원하지
-      않을 수 있어, 지시문을 본문(contents)에 합쳐서 단순하게 요청합니다.
+    - 구형 legacy 모델: systemInstruction/JSON mime을 지원하지 않을 수 있어
+      지시문을 본문(contents)에 합쳐서 단순하게 요청합니다.
     """
     is_legacy = model_name in _LEGACY_GEMINI_MODELS
 
@@ -649,10 +638,8 @@ def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     Gemini REST API를 순서대로 호출해 텍스트 응답을 반환합니다.
     (google-generativeai SDK는 사용하지 않고, requests로 직접 통신합니다.)
 
-    호출 순서(404 = 모델 인식 실패일 때만 다음으로 우회):
-      1) gemini-1.5-flash
-      2) gemini-1.5-flash-latest
-      3) gemini-pro  (구형이지만 가장 안정적인 최종 안전장치)
+    사용 모델: gemini-3.5-flash
+    (후보가 여러 개일 경우 404 = 모델 인식 실패일 때만 다음으로 우회)
     429/일일 한도 오류는 즉시 중단합니다(추가 폴백 호출을 하지 않음).
 
     각 호출이 실패하면 _call_gemini_rest_once() 내부에서

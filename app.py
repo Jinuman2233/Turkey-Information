@@ -661,7 +661,7 @@ st.divider()
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 5가지 주제(무역·관세,
 #      이민·비자, 노무·노동조합, 물류·인프라, 외투기업·제조업 규제)의
 #      최신 기사를 수집
-#   2) Google Gemini API(gemini-1.5-flash)로 기사들을 배치(1~2회) 번역
+#   2) Google Gemini REST API(gemini-3.5-flash)로 기사들을 배치(1~2회) 번역
 #   3) 결과를 6시간 동안 캐시(@st.cache_data)해서 API 비용과 로딩 시간을 절약
 #
 # API 키가 설정되어 있지 않거나(테스트 환경 등) 네트워크/번역에 실패하면,
