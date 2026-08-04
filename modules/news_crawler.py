@@ -146,6 +146,10 @@ API_DAILY_QUOTA_MESSAGE = (
 )
 # 모델 404/일시 통신 오류 등 — 영어 스택트레이스 대신 보여줄 안내
 API_TRANSLATION_BUSY_MESSAGE = "번역 서버와 통신 중입니다. 잠시 후 다시 시도해 주세요."
+API_TIMEOUT_MESSAGE = (
+    "Gemini 번역 서버 응답이 지연되어 시간 초과되었습니다. "
+    "잠시 후 '최신 뉴스 새로고침'으로 다시 시도해 주세요."
+)
 
 # 프로세스 전역 쿨다운 상태.
 # 429가 난 뒤에도 예외는 @st.cache_data에 저장되지 않아, 새로고침할 때마다
@@ -608,7 +612,14 @@ def collect_all_raw_news(
 # 어투로 터키어/영어 뉴스를 한국어로 번역 및 요약"하도록 지시합니다.
 # =============================================================================
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_REQUEST_TIMEOUT_SECONDS = 30
+# (연결 대기, 응답 읽기) — 배치 번역은 응답이 길어서 30초면 ReadTimeout이 자주 납니다.
+GEMINI_CONNECT_TIMEOUT_SECONDS = 15
+GEMINI_READ_TIMEOUT_SECONDS = 90
+GEMINI_REQUEST_TIMEOUT_SECONDS = (GEMINI_CONNECT_TIMEOUT_SECONDS, GEMINI_READ_TIMEOUT_SECONDS)
+GEMINI_TIMEOUT_MAX_RETRIES = 3  # 타임아웃/일시 네트워크 오류 시 최대 시도 횟수
+GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS = 2
+# 배치가 크면 응답 생성에 오래 걸려 타임아웃 위험이 커지므로 한 번에 최대 4개만 번역합니다.
+GEMINI_BATCH_SIZE = 4
 
 # 사용 모델: gemini-3.5-flash (구형 1.5-flash / flash-latest / pro 대체)
 GEMINI_MODEL_NAME = "gemini-3.5-flash"
@@ -762,12 +773,35 @@ def _extract_rest_response_text(data: dict) -> str:
     return ""
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    """ReadTimeout / ConnectTimeout / 일반 Timeout 여부."""
+    if isinstance(
+        exc,
+        (
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectTimeout,
+        ),
+    ):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text or "read timeout" in text
+
+
 def _show_gemini_debug_error(model_name: str, status_code: int, response_text: str) -> None:
     """
     [디버깅 모드] Gemini REST API 호출 실패 시, 원인을 바로 파악할 수 있도록
     응답 원문(response.text)을 뭉뚱그리지 않고 화면에 그대로 출력합니다.
+    타임아웃(HTTP 0)은 사용자 혼란을 줄이기 위해 짧은 한글 안내로 대체합니다.
     """
     try:
+        lowered = (response_text or "").lower()
+        if status_code == 0 and ("timeout" in lowered or "timed out" in lowered):
+            st.warning(
+                f"⏱️ Gemini 응답 지연(모델: `{model_name}`). "
+                "자동으로 재시도하며, 계속되면 '최신 뉴스 새로고침'을 눌러 주세요."
+            )
+            return
         st.error(
             f"🔧 [디버그] Gemini REST API 오류 — 모델: `{model_name}` · HTTP {status_code}\n\n"
             f"```\n{response_text}\n```"
@@ -779,52 +813,78 @@ def _show_gemini_debug_error(model_name: str, status_code: int, response_text: s
 
 def _call_gemini_rest_once(api_key: str, model_name: str, user_prompt: str) -> str:
     """
-    Gemini REST API(v1beta generateContent)를 requests로 1회 직접 호출합니다.
-    SDK(google-generativeai)를 전혀 사용하지 않습니다.
+    Gemini REST API(v1beta generateContent)를 requests로 직접 호출합니다.
+    ReadTimeout 등 일시 오류는 최대 GEMINI_TIMEOUT_MAX_RETRIES회 재시도합니다.
     """
     url = f"{GEMINI_API_BASE_URL}/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = _build_gemini_rest_payload(model_name, user_prompt)
 
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
-        )
-    except requests.exceptions.RequestException as exc:
-        # 네트워크 계층 오류(타임아웃/연결 실패 등)도 원문 그대로 보여줍니다.
-        _show_gemini_debug_error(model_name, 0, f"{type(exc).__name__}: {exc}")
-        raise
+    last_exc: Exception | None = None
+    for attempt in range(1, GEMINI_TIMEOUT_MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.exceptions.Timeout as exc:
+            last_exc = exc
+            if attempt < GEMINI_TIMEOUT_MAX_RETRIES:
+                time.sleep(GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS * attempt)
+                continue
+            _show_gemini_debug_error(model_name, 0, f"{type(exc).__name__}: {exc}")
+            raise RuntimeError(API_TIMEOUT_MESSAGE) from exc
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            # 연결 리셋 등 일시 오류도 한두 번 재시도
+            if attempt < GEMINI_TIMEOUT_MAX_RETRIES and not _is_rate_limit_error(exc):
+                time.sleep(GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS * attempt)
+                continue
+            _show_gemini_debug_error(model_name, 0, f"{type(exc).__name__}: {exc}")
+            raise
 
-    if response.status_code != 200:
-        # ★ 요청사항: 실패 시 API가 반환한 실제 에러 메시지를 화면에 날것 그대로 출력
-        _show_gemini_debug_error(model_name, response.status_code, response.text)
-        raise GeminiHttpError(response.status_code, response.text, model_name)
+        if response.status_code != 200:
+            # ★ 요청사항: 실패 시 API가 반환한 실제 에러 메시지를 화면에 날것 그대로 출력
+            _show_gemini_debug_error(model_name, response.status_code, response.text)
+            raise GeminiHttpError(response.status_code, response.text, model_name)
 
-    try:
-        data = response.json()
-    except ValueError:
-        _show_gemini_debug_error(model_name, response.status_code, response.text)
-        raise RuntimeError(f"Gemini 응답을 JSON으로 해석하지 못했습니다: {response.text[:500]}")
+        try:
+            data = response.json()
+        except ValueError:
+            _show_gemini_debug_error(model_name, response.status_code, response.text)
+            raise RuntimeError(
+                f"Gemini 응답을 JSON으로 해석하지 못했습니다: {response.text[:500]}"
+            )
 
-    return _extract_rest_response_text(data)
+        text = _extract_rest_response_text(data)
+        if text:
+            return text
+        last_exc = RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
+        if attempt < GEMINI_TIMEOUT_MAX_RETRIES:
+            time.sleep(GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS * attempt)
+            continue
+        break
+
+    raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from last_exc
 
 
 def _build_batch_user_prompt(raw_news_batch: list) -> str:
     """
     여러 기사(제목/요약)를 하나의 JSON 배열로 묶어 Gemini에 보낼 프롬프트를 만듭니다.
-    이렇게 하면 기사 수와 관계없이 API를 1번만 호출할 수 있습니다.
+    요약이 너무 길면 잘라서 요청 크기·응답 시간을 줄입니다(타임아웃 완화).
     """
     payload = []
     for idx, item in enumerate(raw_news_batch):
+        summary = (item.get("summary_original") or "").strip()
+        if len(summary) > 500:
+            summary = summary[:500] + "…"
         payload.append(
             {
                 "id": idx,
                 "title": item.get("title_original", ""),
-                "summary": item.get("summary_original", "")
-                or "(제공된 요약이 없어 제목만으로 판단해야 합니다)",
+                "summary": summary or "(제공된 요약이 없어 제목만으로 판단해야 합니다)",
             }
         )
 
@@ -949,9 +1009,7 @@ def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     사용 모델: gemini-3.5-flash
     (후보가 여러 개일 경우 404 = 모델 인식 실패일 때만 다음으로 우회)
     429/일일 한도 오류는 즉시 중단합니다(추가 폴백 호출을 하지 않음).
-
-    각 호출이 실패하면 _call_gemini_rest_once() 내부에서
-    st.error()로 원본 응답을 그대로 화면에 출력합니다(디버깅 모드).
+    ReadTimeout은 _call_gemini_rest_once 내부에서 재시도합니다.
     """
     last_error = None
 
@@ -974,35 +1032,46 @@ def _call_gemini_once(api_key: str, user_prompt: str) -> str:
                 continue
             break
         except requests.exceptions.RequestException as exc:
-            # 네트워크 계층 오류는 폴백하지 않고 바로 실패 처리합니다.
+            last_error = exc
+            if _is_timeout_error(exc):
+                raise RuntimeError(API_TIMEOUT_MESSAGE) from exc
+            break
+        except RuntimeError as exc:
+            # API_TIMEOUT_MESSAGE 등 rest_once에서 올린 안내를 그대로 전달
+            if API_TIMEOUT_MESSAGE in str(exc) or _is_timeout_error(exc):
+                raise
             last_error = exc
             break
 
+    if last_error and (_is_timeout_error(last_error) or API_TIMEOUT_MESSAGE in str(last_error)):
+        raise RuntimeError(API_TIMEOUT_MESSAGE) from last_error
     raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from last_error
+
+
+def _chunk_news_batches(raw_news_list: list, batch_size: int = GEMINI_BATCH_SIZE) -> list:
+    """타임아웃 완화를 위해 기사를 작은 배치로 나눕니다."""
+    if not raw_news_list:
+        return []
+    size = max(1, int(batch_size))
+    return [raw_news_list[i : i + size] for i in range(0, len(raw_news_list), size)]
 
 
 def _translate_news_batch_with_gemini(api_key: str, raw_news_list: list) -> list:
     """
-    여러 기사를 한 번에(배치로) 번역합니다.
+    여러 기사를 배치로 번역합니다.
 
-    - 기본: 전체 기사를 묶어 API를 딱 1번만 호출
-    - 기사가 많아 응답이 잘릴 가능성에 대비해, 필요하면 최대 2개 배치로 나눕니다.
-      (2번째 배치 호출 전에는 time.sleep(4)로 RPM 제한을 피합니다.)
+    - 한 배치당 최대 GEMINI_BATCH_SIZE(4)개로 나눠 ReadTimeout을 줄입니다.
+    - 배치 사이에는 time.sleep으로 RPM 제한을 피합니다.
     """
     if not raw_news_list:
         return []
 
-    # 보통 5개 전후라 1번 호출로 충분합니다. 8개 초과일 때만 2배치로 나눕니다.
-    if len(raw_news_list) <= 8:
-        batches = [raw_news_list]
-    else:
-        mid = (len(raw_news_list) + 1) // 2
-        batches = [raw_news_list[:mid], raw_news_list[mid:]]
+    batches = _chunk_news_batches(raw_news_list, GEMINI_BATCH_SIZE)
 
     all_translated = []
     for batch_index, batch in enumerate(batches):
         if batch_index > 0:
-            # 배치를 2번 호출해야 할 때만, 무료 티어 15 RPM을 넘지 않도록 대기합니다.
+            # 무료 티어 15 RPM을 넘지 않도록 대기합니다.
             time.sleep(BATCH_API_SLEEP_SECONDS)
 
         raw_text = _call_gemini_once(api_key, _build_batch_user_prompt(batch))
@@ -1028,6 +1097,8 @@ def _humanize_gemini_error(exc: Exception) -> str:
         return API_DAILY_QUOTA_MESSAGE
     if API_RATE_LIMIT_MESSAGE in text:
         return API_RATE_LIMIT_MESSAGE
+    if API_TIMEOUT_MESSAGE in text or _is_timeout_error(exc):
+        return API_TIMEOUT_MESSAGE
     if API_TRANSLATION_BUSY_MESSAGE in text:
         return API_TRANSLATION_BUSY_MESSAGE
 
@@ -1051,7 +1122,10 @@ def _humanize_gemini_error(exc: Exception) -> str:
         or "unavailable" in lowered
         or "connection" in lowered
         or "timeout" in lowered
+        or "timed out" in lowered
     ):
+        if "timeout" in lowered or "timed out" in lowered:
+            return API_TIMEOUT_MESSAGE
         return API_TRANSLATION_BUSY_MESSAGE
 
     # 남은 영문 예외도 화면에 그대로 노출하지 않습니다.

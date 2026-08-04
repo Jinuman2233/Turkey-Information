@@ -46,6 +46,7 @@ from modules.news_data import get_dummy_news
 from modules.news_crawler import (
     API_DAILY_QUOTA_MESSAGE,
     API_RATE_LIMIT_MESSAGE,
+    API_TIMEOUT_MESSAGE,
     API_TRANSLATION_BUSY_MESSAGE,
     clear_news_data_caches,
     clear_news_fetch_cooldown,
@@ -729,6 +730,13 @@ if ai_ready:
         error_text == API_TRANSLATION_BUSY_MESSAGE
         or "번역 서버와 통신" in error_text
     )
+    is_timeout = (
+        error_text == API_TIMEOUT_MESSAGE
+        or "시간 초과" in error_text
+        or "응답이 지연" in error_text
+        or "timed out" in error_text.lower()
+        or "readtimeout" in error_text.lower()
+    )
 
     if news_error:
         if is_daily_quota:
@@ -746,6 +754,12 @@ if ai_ready:
             )
             st.warning(f"⚠️ {API_RATE_LIMIT_MESSAGE}{wait_hint}")
             if st.button("지금 다시 시도", key="retry_gemini_news"):
+                clear_news_fetch_cooldown()
+                clear_news_data_caches()
+                st.rerun()
+        elif is_timeout:
+            st.warning(f"⚠️ {API_TIMEOUT_MESSAGE}")
+            if st.button("타임아웃 후 다시 시도", key="retry_gemini_timeout"):
                 clear_news_fetch_cooldown()
                 clear_news_data_caches()
                 st.rerun()
