@@ -10,11 +10,10 @@
 #      - ★ Python에서 발행일을 다시 파싱해 30일보다 오래된 기사는 과감하게 drop
 #      - 최신 발행순으로 상위 N개만 Gemini 번역에 전달
 #   2) 각 기사의 제목/요약(원문, 보통 영어 또는 터키어)을 정리
-#   3) Google Gemini REST API(https://generativelanguage.googleapis.com/v1beta/...)를
+#   3) Google Gemini REST API — 모델 gemini-3.5-flash-lite 를
 #      requests로 "직접" 호출해 한국어로 번역 + 3줄 요약합니다.
-#      ⚠️ Streamlit Cloud에서 google-generativeai SDK 버전 호환성 문제로 반복적으로
-#      404(모델 인식 실패)/통신 오류가 발생해, SDK 의존성을 완전히 제거하고
-#      순수 REST 방식으로 직접 통신하도록 전면 개편했습니다.
+#      ★ 전체 기사를 JSON으로 묶어 generateContent를 단 1회만 호출합니다.
+#      ★ 성공 결과는 @st.cache_data(ttl=86400)으로 24시간 캐시합니다.
 #   4) 결과를 Streamlit 캐시(@st.cache_data, 12시간)에 저장해서
 #      같은 시간 안에는 API를 다시 호출하지 않도록 함 (비용 절감 + 속도 향상)
 #      ※ 번역은 기사별 호출이 아니라 배치 1~2회로 묶어 429(RPM 제한)를 피합니다.
@@ -121,35 +120,25 @@ NEWS_API_AUTOMOTIVE_QUERY = "(otomotiv OR araç OR otomobil OR TOGG)"
 NEWS_LOOKBACK_DAYS = 30  # 오늘 기준 최근 30일(하드코딩 날짜 금지 — datetime으로 동적 계산)
 DEFAULT_MAX_ARTICLES_PER_TOPIC = 5  # 주제당 후보 수집 상한(필터·정렬 전)
 MAX_NEWS_FOR_TRANSLATION = 8  # Gemini 번역으로 넘길 최신 뉴스 개수(5~10 권장 범위)
-# 주제/필터 로직이 바뀌면 캐시 키를 강제로 바꿔 예전(비자동차·오래된) 캐시를 쓰지 않습니다.
-NEWS_CACHE_VERSION = "automotive-30d-v3"
-# 최신 뉴스가 빨리 반영되도록 번역 캐시는 1시간으로 둡니다.
-CACHE_TTL_SECONDS = 60 * 60  # 1시간
-# RSS 원문 수집 캐시(주제별) — 번역 캐시보다 짧게 유지해 최신 기사 유입을 돕습니다.
-RSS_CACHE_TTL_SECONDS = 30 * 60  # 30분
-BATCH_API_SLEEP_SECONDS = 4  # 배치를 2번 이상 나눠 호출할 때, 호출 사이 대기 시간(초)
-# ⚠️ 429가 난 뒤 새로고침할 때마다 API를 다시 치면, 제한이 더 오래가거나 일일 한도를
-# 더 빨리 소진합니다. 그래서 429 결과는 아래 쿨다운 시간 동안 재호출하지 않습니다.
-RATE_LIMIT_COOLDOWN_SECONDS = 180  # 분당(RPM) 제한: 3분 동안 재호출 금지
-# 일일 한도는 1시간 뒤 재시도해도 거의 복구되지 않으므로, 기본적으로 오래 막습니다.
-# (실제 적용 시간은 _daily_quota_cooldown_seconds()가 UTC 자정+여유분으로 계산)
+# 주제/필터/모델 로직이 바뀌면 캐시 키를 강제로 바꿔 예전 결과를 쓰지 않습니다.
+NEWS_CACHE_VERSION = "flash-lite-24h-v1"
+# ★ 무료 할당량(하루 ~20회) 보호: 번역 결과는 24시간(86400초) 캐시합니다.
+# 첫 방문자가 1회 API 호출로 번역하면, 이후 새로고침은 캐시만 사용합니다.
+CACHE_TTL_SECONDS = 86400  # 24시간
+# RSS 원문 수집 캐시(주제별) — Gemini와 무관. 번역 캐시와 맞춰 둡니다.
+RSS_CACHE_TTL_SECONDS = 86400  # 24시간
+# ⚠️ 429가 난 뒤 새로고침할 때마다 API를 다시 치면 일일 한도를 더 소진합니다.
+# 그래서 429 결과는 아래 쿨다운 시간 동안 재호출하지 않습니다.
+RATE_LIMIT_COOLDOWN_SECONDS = 60 * 60 * 6  # 일시 RPM: 6시간
+# 일일 한도는 리셋 전까지 Gemini를 다시 치지 않습니다.
 DAILY_QUOTA_COOLDOWN_SECONDS = 60 * 60 * 18  # 최소 18시간
-# Gemini 무료 티어는 대략 분당 15회(15 RPM) + 일일 요청 한도가 있습니다.
-API_RATE_LIMIT_MESSAGE = (
-    "현재 API 처리 지연 중입니다. 약 3분 후 새로고침 해주세요. "
-    "(연속 새로고침은 제한을 더 악화시킬 수 있습니다)"
-)
-API_DAILY_QUOTA_MESSAGE = (
-    "Gemini 무료 티어 일일 사용량을 초과한 것 같습니다. "
-    "API 재호출을 중단하고, 이전에 번역해 둔 뉴스 또는 원문 RSS로 대체 표시합니다. "
-    "내일 다시 시도하거나 Google AI Studio에서 사용량/플랜을 확인해 주세요."
-)
-# 모델 404/일시 통신 오류 등 — 영어 스택트레이스 대신 보여줄 안내
-API_TRANSLATION_BUSY_MESSAGE = "번역 서버와 통신 중입니다. 잠시 후 다시 시도해 주세요."
-API_TIMEOUT_MESSAGE = (
-    "Gemini 번역 서버 응답이 지연되어 시간 초과되었습니다. "
-    "잠시 후 '최신 뉴스 새로고침'으로 다시 시도해 주세요."
-)
+# 에러 시 화면에 띄울 단일 안내 (빨간 st.error 금지)
+API_QUOTA_FALLBACK_MESSAGE = "현재 AI 번역 한도가 초과되어 원문 기사를 제공합니다."
+# 하위 호환용 별칭 (기존 import/분기 깨지지 않도록 유지)
+API_RATE_LIMIT_MESSAGE = API_QUOTA_FALLBACK_MESSAGE
+API_DAILY_QUOTA_MESSAGE = API_QUOTA_FALLBACK_MESSAGE
+API_TRANSLATION_BUSY_MESSAGE = API_QUOTA_FALLBACK_MESSAGE
+API_TIMEOUT_MESSAGE = API_QUOTA_FALLBACK_MESSAGE
 
 # 프로세스 전역 쿨다운 상태.
 # 429가 난 뒤에도 예외는 @st.cache_data에 저장되지 않아, 새로고침할 때마다
@@ -612,21 +601,18 @@ def collect_all_raw_news(
 # 어투로 터키어/영어 뉴스를 한국어로 번역 및 요약"하도록 지시합니다.
 # =============================================================================
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-# (연결 대기, 응답 읽기) — 배치 번역은 응답이 길어서 30초면 ReadTimeout이 자주 납니다.
+# (연결 대기, 응답 읽기) — 일괄 번역 1회 호출용. 재시도는 할당량을 소진시키므로 하지 않습니다.
 GEMINI_CONNECT_TIMEOUT_SECONDS = 15
-GEMINI_READ_TIMEOUT_SECONDS = 90
+GEMINI_READ_TIMEOUT_SECONDS = 120
 GEMINI_REQUEST_TIMEOUT_SECONDS = (GEMINI_CONNECT_TIMEOUT_SECONDS, GEMINI_READ_TIMEOUT_SECONDS)
-GEMINI_TIMEOUT_MAX_RETRIES = 3  # 타임아웃/일시 네트워크 오류 시 최대 시도 횟수
-GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS = 2
-# 배치가 크면 응답 생성에 오래 걸려 타임아웃 위험이 커지므로 한 번에 최대 4개만 번역합니다.
-GEMINI_BATCH_SIZE = 4
 
-# 사용 모델: gemini-3.5-flash (구형 1.5-flash / flash-latest / pro 대체)
-GEMINI_MODEL_NAME = "gemini-3.5-flash"
+# 사용 모델: gemini-3.5-flash-lite (2026-07 경량 모델, 무료 할당량 친화)
+# URL: .../v1beta/models/gemini-3.5-flash-lite:generateContent?key=...
+GEMINI_MODEL_NAME = "gemini-3.5-flash-lite"
 GEMINI_MODEL_CANDIDATES = (
-    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
 )
-# 구형(gemini-pro 등) 전용 호출 경로. 현재는 3.5-flash만 사용하므로 비워 둡니다.
+# 구형 모델 전용 경로 — 사용하지 않습니다.
 _LEGACY_GEMINI_MODELS = frozenset()
 
 # 예시 파일에 들어 있는 자리표시자 값. 이런 값이 secrets에 있으면
@@ -730,7 +716,7 @@ def _build_gemini_rest_payload(model_name: str, user_prompt: str) -> dict:
     """
     Gemini REST API(generateContent) 요청 본문을 만듭니다.
 
-    - gemini-3.5-flash: systemInstruction + response_mime_type(JSON)을 사용해
+    - gemini-3.5-flash-lite: systemInstruction + response_mime_type(JSON)을 사용해
       번역 지시와 사용자 프롬프트를 분리합니다.
     - 구형 legacy 모델: systemInstruction/JSON mime을 지원하지 않을 수 있어
       지시문을 본문(contents)에 합쳐서 단순하게 요청합니다.
@@ -790,96 +776,58 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 def _show_gemini_debug_error(model_name: str, status_code: int, response_text: str) -> None:
     """
-    [디버깅 모드] Gemini REST API 호출 실패 시, 원인을 바로 파악할 수 있도록
-    응답 원문(response.text)을 뭉뚱그리지 않고 화면에 그대로 출력합니다.
-    타임아웃(HTTP 0)은 사용자 혼란을 줄이기 위해 짧은 한글 안내로 대체합니다.
+    디버그용 훅. 할당량/UX 보호를 위해 화면에 빨간 에러(st.error)를 절대 띄우지 않습니다.
+    (실패 시 app.py가 원문 RSS + st.warning 으로 대체 표시합니다.)
     """
-    try:
-        lowered = (response_text or "").lower()
-        if status_code == 0 and ("timeout" in lowered or "timed out" in lowered):
-            st.warning(
-                f"⏱️ Gemini 응답 지연(모델: `{model_name}`). "
-                "자동으로 재시도하며, 계속되면 '최신 뉴스 새로고침'을 눌러 주세요."
-            )
-            return
-        st.error(
-            f"🔧 [디버그] Gemini REST API 오류 — 모델: `{model_name}` · HTTP {status_code}\n\n"
-            f"```\n{response_text}\n```"
-        )
-    except Exception:
-        # Streamlit 실행 컨텍스트 밖(단위 테스트 등)에서는 조용히 무시합니다.
-        pass
+    return
 
 
 def _call_gemini_rest_once(api_key: str, model_name: str, user_prompt: str) -> str:
     """
-    Gemini REST API(v1beta generateContent)를 requests로 직접 호출합니다.
-    ReadTimeout 등 일시 오류는 최대 GEMINI_TIMEOUT_MAX_RETRIES회 재시도합니다.
+    Gemini REST API(v1beta generateContent)를 requests로 정확히 1회 호출합니다.
+    재시도하지 않습니다 — 무료 일일 할당량(약 20회)을 지키기 위함입니다.
     """
     url = f"{GEMINI_API_BASE_URL}/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = _build_gemini_rest_payload(model_name, user_prompt)
 
-    last_exc: Exception | None = None
-    for attempt in range(1, GEMINI_TIMEOUT_MAX_RETRIES + 1):
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
-            )
-        except requests.exceptions.Timeout as exc:
-            last_exc = exc
-            if attempt < GEMINI_TIMEOUT_MAX_RETRIES:
-                time.sleep(GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS * attempt)
-                continue
-            _show_gemini_debug_error(model_name, 0, f"{type(exc).__name__}: {exc}")
-            raise RuntimeError(API_TIMEOUT_MESSAGE) from exc
-        except requests.exceptions.RequestException as exc:
-            last_exc = exc
-            # 연결 리셋 등 일시 오류도 한두 번 재시도
-            if attempt < GEMINI_TIMEOUT_MAX_RETRIES and not _is_rate_limit_error(exc):
-                time.sleep(GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS * attempt)
-                continue
-            _show_gemini_debug_error(model_name, 0, f"{type(exc).__name__}: {exc}")
-            raise
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+        )
+    except requests.exceptions.Timeout as exc:
+        raise RuntimeError(API_TIMEOUT_MESSAGE) from exc
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from exc
 
-        if response.status_code != 200:
-            # ★ 요청사항: 실패 시 API가 반환한 실제 에러 메시지를 화면에 날것 그대로 출력
-            _show_gemini_debug_error(model_name, response.status_code, response.text)
-            raise GeminiHttpError(response.status_code, response.text, model_name)
+    if response.status_code != 200:
+        # 화면에 원문 에러를 뿌리지 않고, 상위 mid-layer가 원문 뉴스로 fallback 합니다.
+        raise GeminiHttpError(response.status_code, response.text, model_name)
 
-        try:
-            data = response.json()
-        except ValueError:
-            _show_gemini_debug_error(model_name, response.status_code, response.text)
-            raise RuntimeError(
-                f"Gemini 응답을 JSON으로 해석하지 못했습니다: {response.text[:500]}"
-            )
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from exc
 
-        text = _extract_rest_response_text(data)
-        if text:
-            return text
-        last_exc = RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
-        if attempt < GEMINI_TIMEOUT_MAX_RETRIES:
-            time.sleep(GEMINI_TIMEOUT_RETRY_SLEEP_SECONDS * attempt)
-            continue
-        break
-
-    raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from last_exc
+    text = _extract_rest_response_text(data)
+    if not text:
+        raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE)
+    return text
 
 
 def _build_batch_user_prompt(raw_news_batch: list) -> str:
     """
-    여러 기사(제목/요약)를 하나의 JSON 배열로 묶어 Gemini에 보낼 프롬프트를 만듭니다.
-    요약이 너무 길면 잘라서 요청 크기·응답 시간을 줄입니다(타임아웃 완화).
+    ★ 일괄 처리: 전체 기사의 제목/요약을 하나의 JSON으로 묶어
+    Gemini에 단 1번만 보내기 위한 프롬프트를 만듭니다.
     """
     payload = []
     for idx, item in enumerate(raw_news_batch):
         summary = (item.get("summary_original") or "").strip()
-        if len(summary) > 500:
-            summary = summary[:500] + "…"
+        if len(summary) > 400:
+            summary = summary[:400] + "…"
         payload.append(
             {
                 "id": idx,
@@ -890,7 +838,8 @@ def _build_batch_user_prompt(raw_news_batch: list) -> str:
 
     return (
         "아래 JSON 배열의 각 뉴스 기사를 한국어로 번역하고, 핵심 내용을 정확히 3줄로 요약해 주세요.\n"
-        "입력 id 값을 그대로 응답 articles[].id 에 넣어 주세요.\n\n"
+        "입력 id 값을 그대로 응답 articles[].id 에 넣어 주세요.\n"
+        "모든 기사를 빠짐없이 한 번에 처리하세요.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
 
@@ -1003,136 +952,45 @@ def _raise_rate_limit(exc: Exception):
 
 def _call_gemini_once(api_key: str, user_prompt: str) -> str:
     """
-    Gemini REST API를 순서대로 호출해 텍스트 응답을 반환합니다.
-    (google-generativeai SDK는 사용하지 않고, requests로 직접 통신합니다.)
-
-    사용 모델: gemini-3.5-flash
-    (후보가 여러 개일 경우 404 = 모델 인식 실패일 때만 다음으로 우회)
-    429/일일 한도 오류는 즉시 중단합니다(추가 폴백 호출을 하지 않음).
-    ReadTimeout은 _call_gemini_rest_once 내부에서 재시도합니다.
+    gemini-3.5-flash-lite REST API를 정확히 1회 호출합니다.
+    기사별 반복 호출·모델 폴백·타임아웃 재시도는 하지 않습니다(할당량 보호).
     """
-    last_error = None
-
-    for index, model_name in enumerate(GEMINI_MODEL_CANDIDATES):
-        try:
-            if index > 0:
-                time.sleep(0.5)  # 폴백 호출 사이 최소 대기
-            raw_text = _call_gemini_rest_once(api_key, model_name, user_prompt)
-            if raw_text:
-                return raw_text
-            last_error = RuntimeError(f"모델({model_name})이 빈 응답을 반환했습니다.")
-        except GeminiRateLimitError:
-            raise
-        except GeminiHttpError as exc:
-            last_error = exc
-            if _is_rate_limit_error(exc):
-                _raise_rate_limit(exc)
-            if _is_model_not_found_error(exc) and index < len(GEMINI_MODEL_CANDIDATES) - 1:
-                # 404(모델 인식 실패)일 때만 다음 후보로 우회합니다.
-                continue
-            break
-        except requests.exceptions.RequestException as exc:
-            last_error = exc
-            if _is_timeout_error(exc):
-                raise RuntimeError(API_TIMEOUT_MESSAGE) from exc
-            break
-        except RuntimeError as exc:
-            # API_TIMEOUT_MESSAGE 등 rest_once에서 올린 안내를 그대로 전달
-            if API_TIMEOUT_MESSAGE in str(exc) or _is_timeout_error(exc):
-                raise
-            last_error = exc
-            break
-
-    if last_error and (_is_timeout_error(last_error) or API_TIMEOUT_MESSAGE in str(last_error)):
-        raise RuntimeError(API_TIMEOUT_MESSAGE) from last_error
-    raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from last_error
-
-
-def _chunk_news_batches(raw_news_list: list, batch_size: int = GEMINI_BATCH_SIZE) -> list:
-    """타임아웃 완화를 위해 기사를 작은 배치로 나눕니다."""
-    if not raw_news_list:
-        return []
-    size = max(1, int(batch_size))
-    return [raw_news_list[i : i + size] for i in range(0, len(raw_news_list), size)]
+    model_name = GEMINI_MODEL_NAME
+    try:
+        raw_text = _call_gemini_rest_once(api_key, model_name, user_prompt)
+        if raw_text:
+            return raw_text
+        raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE)
+    except GeminiRateLimitError:
+        raise
+    except GeminiHttpError as exc:
+        if _is_rate_limit_error(exc):
+            _raise_rate_limit(exc)
+        raise RuntimeError(API_QUOTA_FALLBACK_MESSAGE) from exc
+    except requests.exceptions.RequestException as exc:
+        if _is_timeout_error(exc):
+            raise RuntimeError(API_TIMEOUT_MESSAGE) from exc
+        raise RuntimeError(API_TRANSLATION_BUSY_MESSAGE) from exc
 
 
 def _translate_news_batch_with_gemini(api_key: str, raw_news_list: list) -> list:
     """
-    여러 기사를 배치로 번역합니다.
-
-    - 한 배치당 최대 GEMINI_BATCH_SIZE(4)개로 나눠 ReadTimeout을 줄입니다.
-    - 배치 사이에는 time.sleep으로 RPM 제한을 피합니다.
+    ★ 완벽한 일괄 처리(Batching):
+    - for 문으로 기사마다 API를 호출하지 않습니다.
+    - 전체 뉴스 제목/요약을 하나의 JSON 프롬프트로 묶어
+      구글 서버에 단 1번의 generateContent 호출만 수행합니다.
+    - 응답 JSON을 파싱해 각 기사에 매핑합니다.
     """
     if not raw_news_list:
         return []
 
-    batches = _chunk_news_batches(raw_news_list, GEMINI_BATCH_SIZE)
-
-    all_translated = []
-    for batch_index, batch in enumerate(batches):
-        if batch_index > 0:
-            # 무료 티어 15 RPM을 넘지 않도록 대기합니다.
-            time.sleep(BATCH_API_SLEEP_SECONDS)
-
-        raw_text = _call_gemini_once(api_key, _build_batch_user_prompt(batch))
-        batch_translated = _parse_batch_translation_response(raw_text, batch)
-        all_translated.extend(batch_translated)
-
-    return all_translated
+    raw_text = _call_gemini_once(api_key, _build_batch_user_prompt(raw_news_list))
+    return _parse_batch_translation_response(raw_text, raw_news_list)
 
 
 def _humanize_gemini_error(exc: Exception) -> str:
-    """Gemini/네트워크 예외 메시지를 사용자가 조치하기 쉬운 한글 안내로 바꿉니다."""
-    if isinstance(exc, GeminiRateLimitError):
-        return API_DAILY_QUOTA_MESSAGE if exc.kind == "daily" else API_RATE_LIMIT_MESSAGE
-    if _is_daily_quota_error(exc):
-        return API_DAILY_QUOTA_MESSAGE
-    if _is_rate_limit_error(exc):
-        return API_RATE_LIMIT_MESSAGE
-
-    text = str(exc)
-    lowered = text.lower()
-
-    if API_DAILY_QUOTA_MESSAGE in text:
-        return API_DAILY_QUOTA_MESSAGE
-    if API_RATE_LIMIT_MESSAGE in text:
-        return API_RATE_LIMIT_MESSAGE
-    if API_TIMEOUT_MESSAGE in text or _is_timeout_error(exc):
-        return API_TIMEOUT_MESSAGE
-    if API_TRANSLATION_BUSY_MESSAGE in text:
-        return API_TRANSLATION_BUSY_MESSAGE
-
-    if "api key" in lowered or "api_key" in lowered or ("invalid" in lowered and "key" in lowered):
-        return (
-            "Gemini API 키가 올바르지 않습니다. "
-            "Streamlit Cloud → App settings → Secrets 에 "
-            '`GEMINI_API_KEY = "실제키"` 형태로 넣었는지 확인한 뒤 Reboot 해 주세요.'
-        )
-    if "permission" in lowered or "403" in lowered:
-        return (
-            "Gemini API 권한 오류(403)입니다. "
-            "Google AI Studio에서 키를 다시 발급받고, Generative Language API 사용이 가능한지 확인해 주세요."
-        )
-    # 모델 404 / 서버 통신 / 기타 영어 에러는 모두 짧은 한글 안내로 통일합니다.
-    # (실제 원인 파악용 원문은 호출 시점에 st.error()로 이미 출력됩니다 — 디버깅 모드)
-    if (
-        _is_model_not_found_error(exc)
-        or "gemini" in lowered
-        or "deadline" in lowered
-        or "unavailable" in lowered
-        or "connection" in lowered
-        or "timeout" in lowered
-        or "timed out" in lowered
-    ):
-        if "timeout" in lowered or "timed out" in lowered:
-            return API_TIMEOUT_MESSAGE
-        return API_TRANSLATION_BUSY_MESSAGE
-
-    # 남은 영문 예외도 화면에 그대로 노출하지 않습니다.
-    has_hangul = any("가" <= ch <= "힣" for ch in text)
-    if text and not has_hangul:
-        return API_TRANSLATION_BUSY_MESSAGE
-    return text if text else API_TRANSLATION_BUSY_MESSAGE
+    """모든 Gemini/네트워크 오류를 원문 fallback용 단일 안내로 통일합니다."""
+    return API_QUOTA_FALLBACK_MESSAGE
 
 
 def _daily_quota_cooldown_seconds() -> int:
@@ -1222,11 +1080,19 @@ def filter_display_news_recent(news_list: list) -> list:
 
 
 def clear_news_data_caches() -> None:
-    """Streamlit 뉴스 관련 @st.cache_data 캐시를 비워 강제 재수집합니다."""
+    """
+    RSS 수집 캐시만 비웁니다.
+    ★ 24시간 번역 캐시(_cached_ai_translated_news)는 할당량 보호를 위해
+    여기서 지우지 않습니다. (새로고침해도 Gemini를 다시 치지 않음)
+    """
     try:
         collect_raw_news_for_topic.clear()
     except Exception:
         pass
+
+
+def clear_translation_cache_for_admin() -> None:
+    """관리자/특수 상황에서만 24시간 번역 캐시를 비웁니다."""
     try:
         _cached_ai_translated_news.clear()
     except Exception:
@@ -1282,32 +1148,36 @@ def _rss_only_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC) -> list:
 
 def _fallback_news_payload(error_message: str, error_kind: str, max_per_topic: int) -> dict:
     """
-    Gemini 실패/쿨다운 시 사용할 대체 뉴스 payload.
-    우선순위: 마지막 성공 번역(30일 재필터) → RSS 원문 → 빈 목록(앱에서 더미로 대체).
+    Gemini 실패/쿨다운 시 대체 payload.
+    ★ 사용자 지침: 에러 시 원문(RSS) 기사를 우선 제공합니다.
+    (빨간 st.error 없이 app.py가 st.warning + 원문 리스트를 렌더링합니다.)
     """
-    last_good = _load_last_good_news()
-    if last_good:
-        return {
-            "news": last_good,
-            "error": error_message,
-            "cooldown_remaining": get_news_fetch_cooldown_remaining(),
-            "error_kind": error_kind,
-            "news_mode": "stale_cache",
-        }
+    message = API_QUOTA_FALLBACK_MESSAGE
 
     rss_news = _rss_only_news(max_per_topic=max_per_topic)
     if rss_news:
         return {
             "news": rss_news,
-            "error": error_message,
+            "error": message,
             "cooldown_remaining": get_news_fetch_cooldown_remaining(),
             "error_kind": error_kind,
             "news_mode": "rss_only",
         }
 
+    # RSS조차 실패하면 이전에 성공한 번역(30일 필터 통과분)을 마지막으로 사용
+    last_good = _load_last_good_news()
+    if last_good:
+        return {
+            "news": last_good,
+            "error": message,
+            "cooldown_remaining": get_news_fetch_cooldown_remaining(),
+            "error_kind": error_kind,
+            "news_mode": "stale_cache",
+        }
+
     return {
         "news": [],
-        "error": error_message,
+        "error": message,
         "cooldown_remaining": get_news_fetch_cooldown_remaining(),
         "error_kind": error_kind,
         "news_mode": "empty",
@@ -1317,38 +1187,31 @@ def _fallback_news_payload(error_message: str, error_kind: str, max_per_topic: i
 # =============================================================================
 # 4. 최종 공개 함수 — app.py에서는 fetch_ai_translated_news()를 호출하면 됩니다.
 # -----------------------------------------------------------------------------
-# 성공한 번역 결과만 @st.cache_data(ttl=12시간)으로 캐시합니다.
-# 429/일일 한도 실패는 예외로 올리되, fetch 단계에서 쿨다운을 걸어
-# 새로고침해도 Gemini를 다시 호출하지 않습니다.
-# 번역은 기사별 개별 호출이 아니라 배치 1~2회로 RPM 제한을 피합니다.
+# ★ @st.cache_data(ttl=86400): 성공한 일괄 번역을 24시간 캐시합니다.
+#   → 하루 첫 방문자만 Gemini를 1회 호출하고, 이후 새로고침은 API 0회입니다.
+# 실패는 캐시하지 않고(예외), fetch 단계에서 원문 RSS로 대체합니다.
 # =============================================================================
 @st.cache_data(
-    ttl=CACHE_TTL_SECONDS,
-    show_spinner="터키 자동차 산업 뉴스를 수집하고 Gemini로 번역하는 중입니다...",
+    ttl=86400,  # 24시간 — 무료 할당량 보호의 핵심
+    show_spinner="터키 자동차 산업 뉴스를 수집하고 Gemini(flash-lite)로 한 번에 번역하는 중입니다...",
 )
 def _cached_ai_translated_news(
     max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC,
     cache_version: str = NEWS_CACHE_VERSION,
 ):
-    """성공한 뉴스 리스트만 캐시합니다. 실패 시 NewsFetchError를 발생시킵니다."""
-    _ = cache_version  # 주제/필터 변경 시 캐시 강제 갱신
+    """성공한 뉴스 리스트만 24시간 캐시합니다. 실패 시 NewsFetchError를 발생시킵니다."""
+    _ = cache_version  # 모델/정책 변경 시 캐시 강제 갱신
     try:
         api_key = _get_gemini_api_key()
         if not api_key:
-            raise NewsFetchError(
-                "GEMINI_API_KEY가 설정되지 않았거나 예시 값(your-gemini-api-key-here) 그대로입니다."
-            )
+            raise NewsFetchError(API_QUOTA_FALLBACK_MESSAGE)
 
         raw_news_list = collect_all_raw_news(max_per_topic=max_per_topic)
-        # ★ 번역 직전 최종 이중 필터: 진짜 한 달 이내 + 최신순만 Gemini로 전달
         raw_news_list = _finalize_news_list(raw_news_list, max_total=MAX_NEWS_FOR_TRANSLATION)
         if not raw_news_list:
-            raise NewsFetchError(
-                "최근 30일 이내의 터키 자동차 산업 기사를 구글 뉴스 RSS에서 찾지 못했습니다. "
-                "네트워크/방화벽 문제이거나 Google News RSS 접근이 차단되었을 수 있습니다."
-            )
+            raise NewsFetchError(API_QUOTA_FALLBACK_MESSAGE)
 
-        # ★ 핵심: 기사마다 for-loop로 API를 치지 않고, 전체를 배치로 1~2번만 번역합니다.
+        # ★ 전체 기사를 묶어 Gemini API를 단 1회만 호출
         translated_parts = _translate_news_batch_with_gemini(api_key, raw_news_list)
 
         translated_news = []
@@ -1365,46 +1228,33 @@ def _cached_ai_translated_news(
                 }
             )
 
-        # 번역 후에도 날짜 기준으로 한 번 더 정리(캐시/이상값 방어)
         translated_news = _finalize_news_list(translated_news, max_total=MAX_NEWS_FOR_TRANSLATION)
         if not translated_news:
-            raise NewsFetchError("번역된 뉴스 결과가 비어 있습니다.")
+            raise NewsFetchError(API_QUOTA_FALLBACK_MESSAGE)
 
         return translated_news
     except GeminiRateLimitError:
-        # 429는 그대로 올려서 fetch 단계에서 쿨다운을 걸도록 합니다.
         raise
     except NewsFetchError:
         raise
     except Exception as exc:
-        # 예기치 못한 예외도 앱이 멈추지 않도록 NewsFetchError로 감쌉니다.
         if _is_rate_limit_error(exc):
             _raise_rate_limit(exc)
-        raise NewsFetchError(_humanize_gemini_error(exc)) from exc
+        raise NewsFetchError(API_QUOTA_FALLBACK_MESSAGE) from exc
 
 
 def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC) -> dict:
     """
     app.py에서 사용하는 공개 함수입니다.
     예외가 나더라도 화면이 멈추지 않도록 항상 dict를 반환합니다.
-
-    Returns
-    -------
-    dict
-        {
-            "news": [뉴스 dict ...],
-            "error": None 또는 사용자용 오류 안내 문자열,
-            "cooldown_remaining": 쿨다운 잔여 초(없으면 0),
-            "error_kind": None | "minute" | "daily" | "other",
-            "news_mode": "live" | "stale_cache" | "rss_only" | "empty",
-        }
+    실패 시 error=API_QUOTA_FALLBACK_MESSAGE + 원문 RSS를 돌려줍니다.
     """
-    # 쿨다운 중이면 Gemini를 절대 다시 호출하지 않고, 보관 뉴스/RSS로 대체합니다.
+    # 쿨다운 중이면 Gemini를 절대 다시 호출하지 않고 원문으로 대체합니다.
     remaining = get_news_fetch_cooldown_remaining()
     if remaining > 0 and _cooldown_state["error"]:
         return _fallback_news_payload(
-            error_message=_cooldown_state["error"],
-            error_kind=_cooldown_state["kind"] or "minute",
+            error_message=API_QUOTA_FALLBACK_MESSAGE,
+            error_kind=_cooldown_state["kind"] or "daily",
             max_per_topic=max_per_topic,
         )
 
@@ -1413,9 +1263,7 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
             max_per_topic=max_per_topic,
             cache_version=NEWS_CACHE_VERSION,
         )
-        # 성공해도 반환 직전 한 번 더 30일 필터(캐시된 이상값 방어)
         news = _finalize_news_list(news, max_total=MAX_NEWS_FOR_TRANSLATION)
-        # 성공하면 장기 보관 + 쿨다운 해제
         _save_last_good_news(news)
         clear_news_fetch_cooldown()
         return {
@@ -1428,32 +1276,30 @@ def fetch_ai_translated_news(max_per_topic: int = DEFAULT_MAX_ARTICLES_PER_TOPIC
     except GeminiRateLimitError as exc:
         _activate_rate_limit_cooldown(exc)
         return _fallback_news_payload(
-            error_message=str(exc) or _humanize_gemini_error(exc),
+            error_message=API_QUOTA_FALLBACK_MESSAGE,
             error_kind=exc.kind,
             max_per_topic=max_per_topic,
         )
-    except NewsFetchError as exc:
-        # 일반 실패(모델 404 소진, 통신 오류 등)도 화면이 비지 않도록
-        # 이전 번역 캐시 → RSS 원문 순으로 대체합니다.
+    except NewsFetchError:
         return _fallback_news_payload(
-            error_message=str(exc),
+            error_message=API_QUOTA_FALLBACK_MESSAGE,
             error_kind="other",
             max_per_topic=max_per_topic,
         )
     except Exception as exc:
         if _is_rate_limit_error(exc):
             rate_exc = GeminiRateLimitError(
-                _humanize_gemini_error(exc),
+                API_QUOTA_FALLBACK_MESSAGE,
                 kind="daily" if _is_daily_quota_error(exc) else "minute",
             )
             _activate_rate_limit_cooldown(rate_exc)
             return _fallback_news_payload(
-                error_message=str(rate_exc),
+                error_message=API_QUOTA_FALLBACK_MESSAGE,
                 error_kind=rate_exc.kind,
                 max_per_topic=max_per_topic,
             )
         return _fallback_news_payload(
-            error_message=_humanize_gemini_error(exc),
+            error_message=API_QUOTA_FALLBACK_MESSAGE,
             error_kind="other",
             max_per_topic=max_per_topic,
         )
