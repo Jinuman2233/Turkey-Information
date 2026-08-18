@@ -19,7 +19,8 @@
 #   4) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
 #      - 시간당 최저임금 (Gross, 세전 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
-#   5) 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역, 실패 시 더미 데이터로 자동 대체)
+#   5) 산업용 에너지·가스 단가 트렌드 (최근 36개월, TRY/EUR)
+#   6) 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역, 실패 시 더미 데이터로 자동 대체)
 # =============================================================================
 
 import streamlit as st
@@ -43,6 +44,7 @@ from modules.minimum_wage import (
     get_hourly_gross_wage_trend,
     MONTHLY_WORKING_HOURS,
 )
+from modules.energy_data import get_energy_price_bundle
 from modules.news_data import get_dummy_news
 from modules.news_crawler import (
     API_QUOTA_FALLBACK_MESSAGE,
@@ -685,7 +687,47 @@ st.divider()
 
 
 # =============================================================================
-# 6. 섹션 5 — 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역)
+# 6. 섹션 5 — 산업용 에너지 및 가스 단가 트렌드 (최근 36개월)
+# -----------------------------------------------------------------------------
+# modules/energy_data.py 독립 모듈:
+#   - Mock 월말 단가(전기/가스/질소/헬륨) + yfinance 월말 EUR/TRY 종가로 EUR 환산
+#   - 차트(EUR) → 통합 테이블(TRY/EUR) 순으로 표시
+# =============================================================================
+render_section_title("⚡ 산업용 에너지 및 가스 단가 트렌드 (최근 36개월)")
+
+try:
+    energy_bundle = get_energy_price_bundle()
+    st.plotly_chart(
+        energy_bundle["figure"],
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+    st.caption(
+        "EUR 단가 추이 · 전기/가스/질소는 왼쪽 축, 헬륨(고가)은 오른쪽 축입니다."
+    )
+    st.dataframe(
+        energy_bundle["display_table"],
+        width="stretch",
+        hide_index=True,
+    )
+    if energy_bundle.get("is_fx_fallback"):
+        st.caption(
+            f"⚠️ {energy_bundle.get('source', '')} "
+            "(월말 환율 일부/전부는 mock 폴백입니다. 단가는 엑셀 업로드로 교체 가능)"
+        )
+    else:
+        st.caption(energy_bundle.get("source", ""))
+    st.caption(
+        "단위 참고: 전기 TRY·EUR/kWh · 가스 TRY·EUR/Sm³ · 질소·헬륨 TRY·EUR/Nm³ · 소수점 2자리"
+    )
+except Exception:
+    st.caption("⚠️ 산업용 에너지/가스 단가 데이터를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+
+st.divider()
+
+
+# =============================================================================
+# 7. 섹션 6 — 터키 현지 뉴스 (실시간 자동 수집 + AI 한국어 번역)
 # -----------------------------------------------------------------------------
 # modules/news_crawler.py 에서 다음과 같은 순서로 뉴스를 준비해 옵니다.
 #   1) feedparser로 구글 뉴스(Google News) RSS에서 터키 자동차 산업
