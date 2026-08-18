@@ -328,8 +328,8 @@ def build_energy_eur_trend_figure(df: pd.DataFrame) -> go.Figure:
     )
 
     fig.update_layout(
-        margin=dict(l=10, r=10, t=28, b=10),
-        height=380,
+        margin=dict(t=18, b=6, l=8, r=8),
+        height=150,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
         autosize=True,
