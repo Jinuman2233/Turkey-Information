@@ -15,6 +15,7 @@
 # 화면 구성 순서 (위 -> 아래):
 #   1) 상단: EUR/TRY, USD/TRY, TRY/KRW 환율 카드 (각 카드 아래 최근 3개월 추이 그래프 포함)
 #   2) 터키 소비자물가지수(TÜİK TÜFE/CPI) 3년 장기 추이 + 최근 12개월 MoM 표
+#   3) 거시·자동차 산업 요약 (CPI/PPI 24개월, OSD 생산·수출 12개월)
 #   3) 터키 기준금리 (최근 2년 월별 그래프)
 #   4) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
@@ -45,6 +46,7 @@ from modules.minimum_wage import (
     MONTHLY_WORKING_HOURS,
 )
 from modules.energy_data import get_energy_price_bundle
+from modules.macro_industry import get_macro_industry_bundle
 from modules.news_data import get_dummy_news
 from modules.news_crawler import (
     API_QUOTA_FALLBACK_MESSAGE,
@@ -473,6 +475,80 @@ else:
         st.caption(
             f"데이터 출처: {OFFICIAL_SOURCE_LABEL} · 수집: {cpi_data.get('source', 'TÜİK')} · 하루 1회 자동 갱신"
         )
+
+st.divider()
+
+
+# =============================================================================
+# 3-B. 거시경제 · 자동차 산업 동향 요약 (고밀도: 탭)
+# -----------------------------------------------------------------------------
+# modules/macro_industry.py
+#   탭1) TÜİK CPI vs PPI YoY 24개월 (생산원가 vs 소비자물가 갭)
+#   탭2) OSD 최근 12개월 생산(막대) · 수출(선) + 최신월 메트릭
+# =============================================================================
+render_section_title("🏭 거시경제 · 자동차 산업 동향 요약")
+
+try:
+    with st.spinner("거시·자동차 산업 동향을 불러오는 중입니다..."):
+        macro_bundle = get_macro_industry_bundle()
+    inflation = macro_bundle["inflation"]
+    auto = macro_bundle["auto"]
+
+    tab_prices, tab_osd = st.tabs(["물가 동향 (CPI / PPI)", "자동차 산업 (OSD)"])
+
+    with tab_prices:
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("CPI YoY", f"{inflation['latest_cpi']:.2f}%", help="소비자물가 전년 동기 대비")
+        with m2:
+            st.metric("PPI YoY", f"{inflation['latest_ppi']:.2f}%", help="생산자물가 전년 동기 대비")
+        with m3:
+            st.metric(
+                "갭 (CPI−PPI)",
+                f"{inflation['latest_gap']:+.2f}%p",
+                help="양수면 소비자물가가 생산자물가보다 높음",
+            )
+        st.plotly_chart(
+            inflation["figure"],
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+        cap = f"기준월 {inflation['latest_month']} · {inflation['source']} · 최근 24개월"
+        if inflation.get("is_dummy"):
+            st.caption(f"⚠️ {cap} (일부/전부 더미 폴백)")
+        else:
+            st.caption(cap)
+
+    with tab_osd:
+        o1, o2, o3 = st.columns(3)
+        with o1:
+            st.metric(
+                f"총 생산량 ({auto['latest_month']})",
+                f"{auto['latest_production']:,}대",
+            )
+        with o2:
+            st.metric(
+                f"수출량 ({auto['latest_month']})",
+                f"{auto['latest_export']:,}대",
+            )
+        with o3:
+            st.metric(
+                "생산 전년 동월 대비",
+                f"{auto['production_yoy']:+.1f}%",
+                delta=f"수출 {auto['export_yoy']:+.1f}%",
+            )
+        st.plotly_chart(
+            auto["figure"],
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+        cap = f"{auto['source']} · 최근 12개월 생산(막대) / 수출(선)"
+        if auto.get("is_dummy"):
+            st.caption(f"⚠️ {cap} (OSD 수집 실패 시 월 10~15만 대 규모 더미)")
+        else:
+            st.caption(cap)
+except Exception:
+    st.caption("⚠️ 거시·자동차 산업 요약 데이터를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
 st.divider()
 
