@@ -305,8 +305,8 @@ def build_cpi_ppi_figure(df: pd.DataFrame) -> go.Figure:
         )
     )
     fig.update_layout(
-        margin=dict(l=8, r=8, t=24, b=8),
-        height=280,
+        margin=dict(t=30, b=10, l=10, r=10),
+        height=260,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, xanchor="left"),
         hovermode="x unified",
         autosize=True,
@@ -487,8 +487,8 @@ def build_osd_figure(df: pd.DataFrame) -> go.Figure:
         )
     )
     fig.update_layout(
-        margin=dict(l=8, r=8, t=24, b=8),
-        height=280,
+        margin=dict(t=30, b=10, l=10, r=10),
+        height=260,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, xanchor="left"),
         hovermode="x unified",
         barmode="overlay",

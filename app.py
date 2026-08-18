@@ -1,18 +1,19 @@
 # =============================================================================
 # app.py
 # -----------------------------------------------------------------------------
-# 터키 비즈니스 & 경제 동향 대시보드 — 1페이지 고밀도 와이드 그리드.
-# 데이터 로직은 modules/ 에 두고, 이 파일은 배치·차트 사이즈만 담당합니다.
+# 터키 비즈니스 & 경제 동향 대시보드 — 고밀도 1페이지 와이드 그리드.
+# 데이터 로직은 modules/ 에 두고, 이 파일은 배치·높이만 담당합니다.
 #
-# Row 1 (3:7)  환율·기준금리 | AI 뉴스(최대 5건, 스크롤)
-# Row 2 (5:5)  최저임금 5년 추이 | CPI·PPI YoY
-# Row 3 (6:4)  에너지/가스 단가 | OSD 생산·수출
+# Top    (3:7)  환율·기준금리 metric | 뉴스 280px 스크롤 박스
+# Middle (1:1)  최저임금 260px       | CPI·PPI 260px
+# Bottom (6:4)  에너지 표 200px      | OSD 요약 + 차트 200px
 # =============================================================================
 
-import streamlit as st
-import plotly.graph_objects as go
+import html
 
-from modules.fx_rates import get_all_fx_rates, get_fx_history, FX_TICKERS
+import streamlit as st
+
+from modules.fx_rates import get_all_fx_rates, FX_TICKERS
 from modules.policy_rate import get_latest_policy_rate
 from modules.minimum_wage import get_hourly_gross_wage_trend, MONTHLY_WORKING_HOURS
 from modules.energy_data import get_energy_price_bundle
@@ -26,7 +27,11 @@ from modules.news_crawler import (
 )
 
 NEWS_DISPLAY_LIMIT = 5
-CHART_HEIGHT = 350
+CHART_HEIGHT = 260
+OSD_CHART_HEIGHT = 200
+ENERGY_CHART_HEIGHT = 200
+TABLE_HEIGHT = 200
+NEWS_BOX_HEIGHT = 280
 CHART_MARGIN = dict(t=30, b=10, l=10, r=10)
 
 st.set_page_config(
@@ -39,52 +44,47 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        html, body, [data-testid="stAppViewContainer"] { overflow-x: hidden; }
         .block-container {
-            padding-top: 0.45rem !important;
-            padding-bottom: 0.8rem !important;
+            padding-top: 1rem !important;
+            padding-bottom: 0rem !important;
             padding-left: 1rem !important;
             padding-right: 1rem !important;
             max-width: 100% !important;
         }
-        header[data-testid="stHeader"] { background: transparent; }
-        div[data-testid="stToolbar"] { display: none; }
-        h1 { font-size: 1.35rem !important; margin: 0 0 0.15rem 0 !important; padding: 0 !important; }
-        .stCaption, [data-testid="stCaptionContainer"] { margin-top: 0 !important; margin-bottom: 0.15rem !important; }
-        div[data-testid="stVerticalBlock"] { gap: 0.35rem !important; }
-        div[data-testid="stHorizontalBlock"] { gap: 0.5rem !important; }
-        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] { padding: 0 0.15rem !important; }
-        hr { margin: 0.25rem 0 !important; }
-        .stPlotlyChart { margin: 0 !important; }
-        [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+        div[data-testid="stMetricValue"] { font-size: 1.5rem; } /* 핵심 지표 폰트 크기 축소 */
+        h1, h2, h3 { margin-top: 0; padding-top: 0; }
+
+        html, body, [data-testid="stAppViewContainer"] { overflow-x: hidden; }
+        header[data-testid="stHeader"] { display: none; }
+        div[data-testid="stToolbar"], #MainMenu, footer { display: none !important; }
+        h1, h2, h3 { margin-bottom: 0.15rem !important; font-size: 1.15rem !important; }
+        .stCaption, [data-testid="stCaptionContainer"] {
+            margin-top: 0 !important; margin-bottom: 0.1rem !important; font-size: 0.72rem !important;
+        }
+        div[data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+        div[data-testid="stHorizontalBlock"] { gap: 0.4rem !important; }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] { padding: 0 0.12rem !important; }
+        .stPlotlyChart { margin: 0 !important; padding: 0 !important; }
         [data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
         [data-testid="stMetricDelta"] { font-size: 0.75rem !important; }
-        div[data-testid="stExpander"] { margin-bottom: 0.15rem !important; }
+        [data-testid="stMetric"] { background: #f7f7f8; padding: 0.35rem 0.5rem; border-radius: 6px; }
         .section-title {
-            font-size: 0.95rem;
-            font-weight: 700;
-            margin: 0 0 0.2rem 0;
-            border-left: 4px solid #C8102E;
-            padding-left: 0.45rem;
-            line-height: 1.25;
+            font-size: 0.88rem; font-weight: 700; margin: 0 0 0.15rem 0;
+            border-left: 4px solid #C8102E; padding-left: 0.4rem; line-height: 1.2;
         }
-        .big-number { font-size: 1.25rem; font-weight: 800; line-height: 1.15; }
-        .small-caption { font-size: 0.75rem; color: #6b6b6b; }
+        .news-scroll-box {
+            max-height: 280px; overflow-y: auto; border: 1px solid #e6e6e6;
+            border-radius: 8px; padding: 0.4rem 0.65rem; background: #fff;
+        }
+        .news-item { padding: 0.35rem 0; border-bottom: 1px solid #eee; }
+        .news-item:last-child { border-bottom: none; }
+        .news-title { font-weight: 700; font-size: 0.86rem; line-height: 1.3; margin-bottom: 0.1rem; }
+        .news-meta { font-size: 0.72rem; color: #6b6b6b; margin-bottom: 0.15rem; }
+        .news-item ul { margin: 0.1rem 0 0 1.1rem; padding: 0; font-size: 0.78rem; line-height: 1.3; }
         .news-badge {
-            display: inline-block;
-            background-color: #C8102E;
-            color: white;
-            font-size: 0.68rem;
-            font-weight: 600;
-            padding: 1px 8px;
-            border-radius: 999px;
-            margin-right: 6px;
-        }
-        @media (max-width: 900px) {
-            div[data-testid="stHorizontalBlock"] { flex-direction: column !important; }
-            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                width: 100% !important; min-width: 100% !important; flex: 1 1 100% !important;
-            }
+            display: inline-block; background-color: #C8102E; color: white;
+            font-size: 0.65rem; font-weight: 600; padding: 1px 7px;
+            border-radius: 999px; margin-right: 6px;
         }
     </style>
     """,
@@ -108,51 +108,50 @@ def render_section_title(text: str):
     st.markdown(f"<div class='section-title'>{text}</div>", unsafe_allow_html=True)
 
 
-def apply_report_chart_size(fig, height: int = CHART_HEIGHT):
-    """모듈 Figure의 데이터는 유지하고, 1페이지용 높이·여백만 app.py에서 맞춥니다."""
+def apply_chart_size(fig, height: int = CHART_HEIGHT):
+    """모듈 Figure 데이터는 유지하고, 1페이지용 높이·여백만 맞춥니다."""
     if fig is None:
         return None
     fig.update_layout(height=height, margin=CHART_MARGIN, autosize=True)
     return fig
 
 
-def render_mini_line_chart(history, chart_key: str, line_color: str = "#C8102E", height: int = 56):
-    if history is None or getattr(history, "empty", True):
-        return
-    hex_color = line_color.lstrip("#")
-    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-    fill_color = f"rgba({r}, {g}, {b}, 0.15)"
-    y_min = float(history.min())
-    y_max = float(history.max())
-    padding = (y_max - y_min) * 0.15 if y_max > y_min else max(abs(y_max) * 0.01, 0.0001)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=history.index,
-            y=history.values,
-            mode="lines",
-            line=dict(color=line_color, width=1.6),
-            fill="tozeroy",
-            fillcolor=fill_color,
-            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.4f}<extra></extra>",
+def render_news_scroll_box(news_list: list) -> None:
+    """뉴스를 max-height:280px overflow-y:auto 박스 안에 가둡니다."""
+    items = []
+    for news in news_list:
+        title = html.escape(str(news.get("title_kr") or "(제목 없음)"))
+        category = html.escape(str(news.get("category") or ""))
+        date = html.escape(str(news.get("date") or "날짜 미상"))
+        source = html.escape(str(news.get("source") or ""))
+        summaries = news.get("summary_kr") or []
+        summary_html = "".join(
+            f"<li>{html.escape(str(line))}</li>" for line in summaries[:2]
         )
+        raw_link = str(news.get("link") or "").strip()
+        if raw_link.startswith("http://") or raw_link.startswith("https://"):
+            href = html.escape(raw_link, quote=True)
+            link_html = f' · <a href="{href}" target="_blank" rel="noopener">원문</a>'
+        else:
+            link_html = ""
+        items.append(
+            "<div class='news-item'>"
+            f"<div class='news-title'>{title}</div>"
+            f"<div class='news-meta'><span class='news-badge'>{category}</span>"
+            f"{date} · {source}{link_html}</div>"
+            f"<ul>{summary_html}</ul>"
+            "</div>"
+        )
+    st.markdown(
+        f'<div class="news-scroll-box" style="max-height:{NEWS_BOX_HEIGHT}px; overflow-y:auto;">'
+        f"{''.join(items)}</div>",
+        unsafe_allow_html=True,
     )
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=2, b=0),
-        height=height,
-        showlegend=False,
-        xaxis=dict(showgrid=False, visible=False),
-        yaxis=dict(showgrid=False, visible=False, range=[y_min - padding, y_max + padding], autorange=False),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=chart_key)
 
 
 def load_news_list() -> tuple[list, str, bool]:
-    """뉴스 리스트, 모드, 더미 여부."""
     if not is_ai_translation_configured():
-        return get_dummy_news(), "empty", True
+        return get_dummy_news()[:NEWS_DISPLAY_LIMIT], "empty", True
     try:
         news_result = fetch_ai_translated_news()
     except Exception:
@@ -164,15 +163,11 @@ def load_news_list() -> tuple[list, str, bool]:
         st.caption(f"⚠️ {API_QUOTA_FALLBACK_MESSAGE}")
     news_list = filter_display_news_recent(news_list)
     if not news_list:
-        return get_dummy_news(), news_mode, True
+        return get_dummy_news()[:NEWS_DISPLAY_LIMIT], news_mode, True
     return news_list[:NEWS_DISPLAY_LIMIT], news_mode, False
 
 
-# -----------------------------------------------------------------------------
-# 데이터 로드 (모듈 로직 변경 없음)
-# -----------------------------------------------------------------------------
 st.markdown("### 🇹🇷 터키 비즈니스 & 경제 동향")
-st.caption("1페이지 고밀도 그리드 · 향후 PDF/Excel 추출용 레이아웃")
 
 with st.spinner("대시보드 데이터를 불러오는 중입니다..."):
     fx_rates = get_all_fx_rates()
@@ -193,71 +188,37 @@ with st.spinner("대시보드 데이터를 불러오는 중입니다..."):
 
 
 # =============================================================================
-# Row 1 — 3:7  환율·기준금리 | AI 뉴스
+# Top Row — 3:7  환율·기준금리 | 뉴스 280px
 # =============================================================================
-row1_left, row1_right = st.columns([3, 7], gap="small")
+col1, col2 = st.columns([3, 7], gap="small")
 
-with row1_left:
+with col1:
     render_section_title("💱 환율 · 🏦 기준금리")
-    fx_c1, fx_c2, fx_c3 = st.columns(3)
-    for col, fx_key in zip((fx_c1, fx_c2, fx_c3), FX_TICKERS.keys()):
+    fx_cols = st.columns(len(FX_TICKERS))
+    for col, fx_key in zip(fx_cols, FX_TICKERS.keys()):
         info = FX_TICKERS[fx_key]
         rate = fx_rates.get(fx_key)
+        short_label = info["label"].split("(")[0].strip()
         with col:
-            with st.container(border=True):
-                short_label = info["label"].split("(")[0].strip()
-                st.markdown(f"**{short_label}**")
-                if rate is None:
-                    st.markdown("<div class='big-number'>-</div>", unsafe_allow_html=True)
-                else:
-                    current = rate["current"]
-                    change = rate["change"]
-                    change_pct = rate["change_pct"]
-                    if change > 0:
-                        delta_color, arrow = "#C8102E", "▲"
-                    elif change < 0:
-                        delta_color, arrow = "#1565C0", "▼"
-                    else:
-                        delta_color, arrow = "#6b6b6b", "-"
-                    st.markdown(
-                        f"<div class='big-number'>{format_number(current)}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"<span style='color:{delta_color}; font-weight:600; font-size:0.78rem;'>"
-                        f"{arrow} {change_pct:+.2f}%</span>",
-                        unsafe_allow_html=True,
-                    )
-                    history_3mo = get_fx_history(fx_key, period="3mo")
-                    render_mini_line_chart(
-                        history_3mo,
-                        chart_key=f"fx_mini_{fx_key}",
-                        line_color=delta_color if change != 0 else "#C8102E",
-                    )
-
-    with st.container(border=True):
-        change = latest_rate_info.get("change") or 0
-        change_text = f"{change:+.2f}%p" if change != 0 else "변동 없음"
-        st.metric(
-            "기준금리 (1주 레포)",
-            f"{latest_rate_info['rate']:.2f}%",
-            delta=f"{latest_rate_info['month']} · {change_text}",
-        )
-
-with row1_right:
-    render_section_title("📰 터키 자동차 산업 뉴스 (AI 번역 · 최신 5건)")
-    with st.container(height=360, border=True):
-        for news in news_list:
-            with st.expander(f"{news.get('title_kr', '(제목 없음)')}", expanded=False):
-                st.markdown(
-                    f"<span class='news-badge'>{news.get('category', '')}</span>"
-                    f"<span class='small-caption'>발행 일시: {news.get('date', '날짜 미상')} · {news.get('source', '')}</span>",
-                    unsafe_allow_html=True,
+            if rate is None:
+                st.metric(short_label, "-")
+            else:
+                st.metric(
+                    short_label,
+                    format_number(rate["current"]),
+                    f"{rate['change_pct']:+.2f}%",
                 )
-                for line in news.get("summary_kr") or []:
-                    st.markdown(f"- {line}")
-                if news.get("link"):
-                    st.link_button("원문 보기", news["link"])
+    change = latest_rate_info.get("change") or 0
+    change_text = f"{change:+.2f}%p" if change != 0 else "변동 없음"
+    st.metric(
+        "기준금리 (1주 레포)",
+        f"{latest_rate_info['rate']:.2f}%",
+        f"{latest_rate_info['month']} · {change_text}",
+    )
+
+with col2:
+    render_section_title("📰 터키 실시간 AI 번역 뉴스")
+    render_news_scroll_box(news_list)
     if is_dummy_news:
         st.caption("⚠️ 예시(더미) 뉴스")
     elif news_mode == "rss_only":
@@ -267,72 +228,70 @@ with row1_right:
 
 
 # =============================================================================
-# Row 2 — 5:5  최저임금 5년 | CPI·PPI
+# Middle Row — 1:1  최저임금 260 | CPI·PPI 260
 # =============================================================================
-row2_left, row2_right = st.columns([5, 5], gap="small")
+col3, col4 = st.columns(2, gap="small")
 
-with row2_left:
+with col3:
     render_section_title("💰 최저임금 5년 추이 (시간당 Gross)")
     if wage_trend and wage_trend.get("figure") is not None:
-        fig_wage = apply_report_chart_size(wage_trend["figure"])
+        fig_wage = apply_chart_size(wage_trend["figure"], height=CHART_HEIGHT)
         st.plotly_chart(fig_wage, width="stretch", config={"displayModeBar": False})
-        st.caption(wage_trend.get("source", "")[:120])
+        st.caption((wage_trend.get("source") or "")[:120])
     else:
         st.caption("⚠️ 최저임금 추이 차트를 준비하지 못했습니다.")
 
-with row2_right:
-    render_section_title("📈 물가 동향 CPI · PPI (YoY, 24개월)")
+with col4:
+    render_section_title("📈 물가 동향 CPI · PPI (YoY)")
     inflation = (macro_bundle or {}).get("inflation") if macro_bundle else None
     if inflation and inflation.get("figure") is not None:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("CPI YoY", f"{inflation['latest_cpi']:.1f}%")
-        m2.metric("PPI YoY", f"{inflation['latest_ppi']:.1f}%")
-        m3.metric("갭", f"{inflation['latest_gap']:+.1f}%p")
-        fig_inf = apply_report_chart_size(inflation["figure"])
+        fig_inf = apply_chart_size(inflation["figure"], height=CHART_HEIGHT)
         st.plotly_chart(fig_inf, width="stretch", config={"displayModeBar": False})
         extra = " · 더미 폴백" if inflation.get("is_dummy") else ""
-        st.caption(f"{inflation.get('latest_month', '')} · {inflation.get('source', '')}{extra}")
+        st.caption(
+            f"CPI {inflation['latest_cpi']:.1f}% · PPI {inflation['latest_ppi']:.1f}% · "
+            f"갭 {inflation['latest_gap']:+.1f}%p · {inflation.get('latest_month', '')}{extra}"
+        )
     else:
         st.caption("⚠️ CPI/PPI 차트를 준비하지 못했습니다.")
 
 
 # =============================================================================
-# Row 3 — 6:4  에너지/가스 | OSD
+# Bottom Row — 6:4  에너지 표+콤팩트 차트 | OSD 200
 # =============================================================================
-row3_left, row3_right = st.columns([6, 4], gap="small")
+col5, col6 = st.columns([6, 4], gap="small")
 
-with row3_left:
-    render_section_title("⚡ 산업용 에너지 · 가스 단가 (36개월)")
-    if energy_bundle and energy_bundle.get("figure") is not None:
-        fig_e = apply_report_chart_size(energy_bundle["figure"], height=280)
-        st.plotly_chart(fig_e, width="stretch", config={"displayModeBar": False})
-        table = energy_bundle.get("display_table")
-        if table is not None and not getattr(table, "empty", True):
-            st.dataframe(table, width="stretch", hide_index=True, height=220)
+with col5:
+    render_section_title("⚡ 산업용 에너지 · 가스 단가")
+    if energy_bundle:
+        energy_left, energy_right = st.columns([5, 5], gap="small")
+        with energy_left:
+            if energy_bundle.get("figure") is not None:
+                fig_e = apply_chart_size(energy_bundle["figure"], height=ENERGY_CHART_HEIGHT)
+                st.plotly_chart(fig_e, width="stretch", config={"displayModeBar": False})
+        with energy_right:
+            table = energy_bundle.get("display_table")
+            if table is not None and not getattr(table, "empty", True):
+                st.dataframe(table, width="stretch", hide_index=True, height=TABLE_HEIGHT)
         note = energy_bundle.get("source", "")
         if energy_bundle.get("is_fx_fallback"):
             st.caption(f"⚠️ {note}")
-        else:
+        elif note:
             st.caption(note)
     else:
         st.caption("⚠️ 에너지/가스 단가 데이터를 준비하지 못했습니다.")
 
-with row3_right:
-    render_section_title("🏭 OSD 자동차 생산 · 수출 (12개월)")
+with col6:
+    render_section_title("🏭 OSD 자동차 생산 · 수출")
     auto = (macro_bundle or {}).get("auto") if macro_bundle else None
     if auto and auto.get("figure") is not None:
         a1, a2, a3 = st.columns(3)
         a1.metric("생산", f"{auto['latest_production']:,}")
         a2.metric("수출", f"{auto['latest_export']:,}")
         a3.metric("YoY", f"{auto['production_yoy']:+.1f}%")
-        fig_osd = apply_report_chart_size(auto["figure"])
+        fig_osd = apply_chart_size(auto["figure"], height=OSD_CHART_HEIGHT)
         st.plotly_chart(fig_osd, width="stretch", config={"displayModeBar": False})
         extra = " · 더미" if auto.get("is_dummy") else ""
         st.caption(f"{auto.get('latest_month', '')} · {auto.get('source', '')}{extra}")
     else:
         st.caption("⚠️ OSD 동향을 준비하지 못했습니다.")
-
-st.caption(
-    "참고 자료이며 공식 의사결정의 대체 정보가 아닙니다. "
-    "환율: yfinance · 물가: TÜİK/TCMB · 뉴스: Google News + Gemini."
-)
