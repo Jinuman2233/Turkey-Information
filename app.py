@@ -40,6 +40,7 @@ from modules.minimum_wage import (
     get_minimum_wage_info,
     convert_wage_to_foreign_currencies,
     get_hourly_gross_wage_try,
+    get_hourly_gross_wage_trend,
     MONTHLY_WORKING_HOURS,
 )
 from modules.news_data import get_dummy_news
@@ -650,6 +651,35 @@ with hourly_col4:
         display_value = f"₩ {format_number(hourly_krw, 0)}" if hourly_krw else "-"
         st.markdown(f"<div class='big-number'>{display_value}</div>", unsafe_allow_html=True)
         st.caption("현재 TRY/KRW 환율 기준")
+
+# -----------------------------------------------------------------------------
+# 5-3) 최근 5년 시간당 Gross 최저임금 추이 (TRY / EUR / USD)
+# -----------------------------------------------------------------------------
+st.markdown(
+    "<div style='margin-top:1rem; font-weight:700;'>📈 최근 5년 시간당 Gross 최저임금 추이 "
+    "(TRY · EUR · USD)</div>",
+    unsafe_allow_html=True,
+)
+try:
+    wage_trend = get_hourly_gross_wage_trend(monthly_hours=MONTHLY_WORKING_HOURS)
+    st.plotly_chart(
+        wage_trend["figure"],
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+    if wage_trend.get("is_fx_fallback"):
+        st.caption(
+            f"⚠️ {wage_trend.get('source', '')} "
+            "(환율 실시간 수집 실패 시 mock 월평균 환율 폴백 사용)"
+        )
+    else:
+        st.caption(wage_trend.get("source", ""))
+    st.caption(
+        "TRY 선 위 숫자(+%)는 이전 월 대비 시간당 Gross 인상률입니다. "
+        "EUR/USD는 해당 월 평균 환율로 환산한 값입니다."
+    )
+except Exception:
+    st.caption("⚠️ 최저임금 5년 추이 차트를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
 st.divider()
 
