@@ -17,7 +17,7 @@ from modules.fx_rates import get_all_fx_rates, FX_TICKERS
 from modules.policy_rate import get_latest_policy_rate
 from modules.minimum_wage import get_hourly_gross_wage_trend, MONTHLY_WORKING_HOURS
 from modules.energy_data import get_energy_price_bundle
-from modules.macro_industry import get_macro_industry_bundle, render_osd_industry_section
+from modules.macro_industry import get_macro_industry_bundle
 from modules.news_data import get_dummy_news
 from modules.news_crawler import (
     API_QUOTA_FALLBACK_MESSAGE,
@@ -46,8 +46,7 @@ st.markdown(
         [data-testid="stMain"], section.main, .stApp, .main {
             height: 100vh !important;
             max-height: 100vh !important;
-            overflow-x: hidden !important;
-            overflow-y: auto !important;
+            overflow: hidden !important;
         }
         .block-container, [data-testid="stMainBlockContainer"] {
             padding-top: 0.35rem !important;
@@ -56,8 +55,7 @@ st.markdown(
             padding-right: 0.7rem !important;
             max-width: 100% !important;
             height: 100vh !important;
-            overflow-x: hidden !important;
-            overflow-y: auto !important;
+            overflow: hidden !important;
         }
         header[data-testid="stHeader"], div[data-testid="stToolbar"],
         #MainMenu, footer, [data-testid="stDecoration"],
@@ -76,12 +74,15 @@ st.markdown(
         [data-testid="stVerticalBlockBorderWrapper"] { padding: 0 !important; }
 
         [data-testid="stPlotlyChart"] {
+            height: 21vh !important;
+            min-height: 130px;
             margin: 0 !important;
             padding: 0 !important;
         }
-        [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
-        [data-testid="stMetricLabel"] { font-size: 0.72rem !important; }
-        [data-testid="stMetricDelta"] { font-size: 0.7rem !important; }
+        [data-testid="stPlotlyChart"] iframe {
+            height: 21vh !important;
+            min-height: 130px;
+        }
         [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"] {
             height: 21vh !important;
             min-height: 130px;
@@ -336,4 +337,20 @@ with col5:
 
 with col6:
     auto = (macro_bundle or {}).get("auto") if macro_bundle else None
-    render_osd_industry_section(auto)
+    if auto and auto.get("figure") is not None:
+        render_section_title("🏭 OSD 자동차 생산 · 수출")
+        st.markdown(
+            "<div class='mini-stats'>"
+            f"생산 <b>{auto['latest_production']:,}</b> · "
+            f"수출 <b>{auto['latest_export']:,}</b> · "
+            f"YoY <b>{auto['production_yoy']:+.1f}%</b>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(
+            apply_chart_size(auto["figure"], BOTTOM_CHART_HEIGHT),
+            width="stretch",
+            config={"displayModeBar": False, "responsive": True},
+        )
+    else:
+        render_section_title("🏭 OSD 자동차 생산 · 수출")
