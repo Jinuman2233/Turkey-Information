@@ -1,12 +1,13 @@
 # =============================================================================
 # macro_industry.py
 # -----------------------------------------------------------------------------
-# 거시경제(TÜİK CPI·PPI)와 자동차 산업(OSD 생산/수출) 요약 모듈입니다.
+# 거시경제(TÜİK CPI·PPI)와 자동차 산업(OSD 연간 생산/수출/내수) 모듈입니다.
 #
 # 1) CPI(TÜFE) / PPI(Yİ-ÜFE) 전년 동기 대비(YoY) 최근 24개월
-# 2) OSD 월간 총 생산·수출 대수 최근 12개월
+# 2) OSD 연간 총 생산·수출·국내판매 (2021~2025 + 당해 YTD)
 #
-# 외부 수집이 실패해도 현실적인 더미로 차트가 비지 않도록 방어합니다.
+# OSD는 API가 불안정하므로 엑셀 연동 뼈대 + 현실적인 연간 더미를 씁니다.
+# 화면에는 expander/tab 없이 항상 바로 렌더링합니다.
 # =============================================================================
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ from __future__ import annotations
 from datetime import datetime
 from io import StringIO
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
@@ -24,7 +24,10 @@ from plotly.subplots import make_subplots
 
 CACHE_TTL_SECONDS = 60 * 60 * 24
 CPI_PPI_MONTHS = 24
-OSD_MONTHS = 12
+OSD_EXCEL_COLUMNS = ("Year", "Production", "Export", "Sales")
+OSD_YTD_LABEL = "2026 (YTD)"
+OSD_CHART_HEIGHT = 260
+OSD_CHART_MARGIN = dict(t=30, b=10, l=10, r=10)
 
 HTTP_HEADERS = {
     "User-Agent": (
@@ -36,11 +39,6 @@ HTTP_HEADERS = {
 TCMB_PPI_URLS = (
     "https://www.tcmb.gov.tr/wps/wcm/connect/TR/TCMB+TR/Main+Menu/Istatistikler/Enflasyon+Verileri/Uretici+Fiyatlari",
     "https://www.tcmb.gov.tr/wps/wcm/connect/EN/TCMB+EN/Main+Menu/Statistics/Inflation+Data/Producer+Prices",
-)
-
-OSD_URLS = (
-    "https://www.osd.org.tr/en/statistics",
-    "https://www.osd.org.tr/istatistikler",
 )
 
 FRED_PPI_TICKERS = (
@@ -386,156 +384,207 @@ def get_cpi_ppi_trend(n_months: int = CPI_PPI_MONTHS) -> dict:
 
 
 # -----------------------------------------------------------------------------
-# OSD 자동차 생산/수출 (월 10~15만 대 수준 더미 + 선택적 크롤)
+# OSD 자동차 연간 생산/수출/내수 (2021~2025 + 당해 YTD)
+# 엑셀 컬럼: Year, Production, Export, Sales  → Export_Ratio 는 계산 컬럼
 # -----------------------------------------------------------------------------
-def build_osd_fallback(n_months: int = OSD_MONTHS, as_of: datetime | None = None) -> pd.DataFrame:
+# 터키 전체 산업 규모에 맞춘 확정 더미 (생산 120~150만, 수출 생산의 65~75%,
+# 내수 판매 70~110만). 2026은 연간 누적(YTD)이라 풀이어보다 낮게 둡니다.
+OSD_ANNUAL_FALLBACK_ROWS = (
+    {"Year": 2021, "Production": 1_276_140, "Export": 937_020, "Sales": 737_350},
+    {"Year": 2022, "Production": 1_352_648, "Export": 969_820, "Sales": 783_280},
+    {"Year": 2023, "Production": 1_468_403, "Export": 1_014_180, "Sales": 967_340},
+    {"Year": 2024, "Production": 1_371_296, "Export": 1_003_450, "Sales": 985_620},
+    {"Year": 2025, "Production": 1_425_800, "Export": 1_018_400, "Sales": 1_062_150},
+    {"Year": OSD_YTD_LABEL, "Production": 986_420, "Export": 702_180, "Sales": 728_540},
+)
+
+
+def _format_osd_year(value) -> str:
+    text = str(value).strip()
+    if "YTD" in text.upper():
+        return OSD_YTD_LABEL
+    try:
+        year = int(float(text.replace(",", "")))
+        return str(year)
+    except (TypeError, ValueError):
+        return text
+
+
+def normalize_osd_annual_df(df: pd.DataFrame) -> pd.DataFrame:
+    """엑셀/더미 원본을 Year, Production, Export, Sales, Export_Ratio 로 맞춥니다."""
+    rename = {}
+    for col in df.columns:
+        key = str(col).strip().lower().replace(" ", "_")
+        if key in {"year", "연도", "년도"}:
+            rename[col] = "Year"
+        elif key in {"production", "생산", "생산량", "toplam_uretim", "üretim"}:
+            rename[col] = "Production"
+        elif key in {"export", "수출", "수출량", "ihracat"}:
+            rename[col] = "Export"
+        elif key in {"sales", "판매", "판매량", "내수", "국내판매", "pazary"}:
+            rename[col] = "Sales"
+    out = df.rename(columns=rename).copy()
+    missing = [c for c in OSD_EXCEL_COLUMNS if c not in out.columns]
+    if missing:
+        raise ValueError(f"OSD 연간 데이터에 필요한 컬럼이 없습니다: {missing}")
+
+    out = out[list(OSD_EXCEL_COLUMNS)].copy()
+    out["Year"] = out["Year"].map(_format_osd_year)
+    for col in ("Production", "Export", "Sales"):
+        out[col] = (
+            pd.to_numeric(
+                out[col].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+                errors="coerce",
+            )
+            .round()
+            .astype("Int64")
+        )
+    out = out.dropna(subset=["Production", "Export", "Sales"]).reset_index(drop=True)
+    if out.empty:
+        raise ValueError("OSD 연간 데이터가 비어 있습니다.")
+    out["Export_Ratio"] = (out["Export"] / out["Production"] * 100.0).round(1)
+    return out
+
+
+def build_osd_annual_fallback() -> pd.DataFrame:
+    """2021~2025 + 2026 YTD 현실적 더미. 엑셀 연동 전 기본 뼈대입니다."""
+    return normalize_osd_annual_df(pd.DataFrame(list(OSD_ANNUAL_FALLBACK_ROWS)))
+
+
+def load_osd_annual_from_excel(file_or_path) -> pd.DataFrame:
     """
-    터키 OSD 월간 생산 10만~15만 대, 수출은 생산의 약 70~80% 더미.
-    YoY 계산을 위해 내부적으로 24개월을 만든 뒤 최근 n_months만 반환합니다.
+    향후 엑셀 업로드 대체용.
+    필수 컬럼: Year, Production, Export, Sales
+    Export_Ratio 는 없어도 계산합니다.
     """
-    months = _month_index(n_months + 12, as_of=as_of)
-    rng = np.random.default_rng(20260818)
-    n = len(months)
-    t = np.arange(n, dtype=float)
-    seasonal = 8000 * np.sin(2 * np.pi * (t + 2) / 12)
-    production = 118_000 + 900 * t + seasonal + rng.normal(0, 2500, n)
-    production = np.clip(production, 100_000, 150_000)
-    export_ratio = 0.74 + 0.04 * np.sin(2 * np.pi * t / 10)
-    export = np.clip(production * export_ratio + rng.normal(0, 1500, n), 75_000, 140_000)
+    from pathlib import Path
 
-    df = pd.DataFrame(
-        {
-            "날짜": months,
-            "생산량": np.round(production).astype(int),
-            "수출량": np.round(export).astype(int),
-        }
-    )
-    df["연월"] = df["날짜"].dt.strftime("%Y-%m")
-    df["생산_YoY"] = df["생산량"].pct_change(12) * 100.0
-    df["수출_YoY"] = df["수출량"].pct_change(12) * 100.0
-    return df.tail(n_months).reset_index(drop=True)
+    if isinstance(file_or_path, (str, Path)):
+        raw = pd.read_excel(file_or_path)
+    else:
+        from io import BytesIO
 
-
-def _fetch_osd_monthly() -> pd.DataFrame:
-    """OSD 통계 페이지에서 월간 생산/수출 표를 시도합니다. 실패하면 예외."""
-    last_error = None
-    for url in OSD_URLS:
-        try:
-            response = requests.get(url, timeout=15, headers=HTTP_HEADERS)
-            response.raise_for_status()
-            tables = pd.read_html(StringIO(response.text))
-            if not tables:
-                raise RuntimeError("OSD 표 없음")
-            raw = max(tables, key=lambda t: len(t)).copy()
-            raw.columns = [str(c).strip() for c in raw.columns]
-            prod_col = None
-            exp_col = None
-            month_col = raw.columns[0]
-            for col in raw.columns:
-                name = str(col).lower()
-                if prod_col is None and ("üretim" in name or "production" in name or "생산" in name):
-                    prod_col = col
-                if exp_col is None and ("ihracat" in name or "export" in name or "수출" in name):
-                    exp_col = col
-            if prod_col is None or exp_col is None:
-                raise RuntimeError(f"OSD 컬럼 미인식: {list(raw.columns)}")
-            rows = []
-            for _, row in raw.iterrows():
-                try:
-                    month = pd.to_datetime(str(row[month_col]), errors="coerce")
-                    prod = int(float(str(row[prod_col]).replace(".", "").replace(",", "")))
-                    exp = int(float(str(row[exp_col]).replace(".", "").replace(",", "")))
-                except (TypeError, ValueError):
-                    continue
-                if pd.isna(month) or prod < 10_000:
-                    continue
-                ts = pd.Timestamp(month).to_period("M").to_timestamp("M")
-                rows.append({"날짜": ts, "생산량": prod, "수출량": exp})
-            if len(rows) < 6:
-                raise RuntimeError("OSD 행 부족")
-            df = pd.DataFrame(rows).drop_duplicates("날짜").sort_values("날짜")
-            df["연월"] = df["날짜"].dt.strftime("%Y-%m")
-            df["생산_YoY"] = df["생산량"].pct_change(12) * 100.0
-            df["수출_YoY"] = df["수출량"].pct_change(12) * 100.0
-            return df.tail(OSD_MONTHS).reset_index(drop=True)
-        except Exception as exc:
-            last_error = exc
-            continue
-    raise RuntimeError(f"OSD 수집 실패: {last_error}")
+        raw = pd.read_excel(BytesIO(file_or_path.read()) if hasattr(file_or_path, "read") else file_or_path)
+    return normalize_osd_annual_df(raw)
 
 
 def build_osd_figure(df: pd.DataFrame) -> go.Figure:
-    fig = make_subplots(specs=[[{"secondary_y": False}]])
+    """생산/수출/판매 그룹 막대 + 수출률 보조축 꺾은선."""
+    years = df["Year"].astype(str)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
         go.Bar(
-            x=df["날짜"],
-            y=df["생산량"],
-            name="총 생산량",
-            marker=dict(color="rgba(200, 16, 46, 0.45)"),
-            hovertemplate="%{x|%Y-%m}<br>생산: %{y:,.0f}대<extra></extra>",
-        )
+            x=years,
+            y=df["Production"],
+            name="생산량",
+            marker=dict(color="#C8102E"),
+            hovertemplate="%{x}<br>생산: %{y:,.0f}대<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=years,
+            y=df["Export"],
+            name="수출량",
+            marker=dict(color="#1565C0"),
+            hovertemplate="%{x}<br>수출: %{y:,.0f}대<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=years,
+            y=df["Sales"],
+            name="판매량",
+            marker=dict(color="#2E7D32"),
+            hovertemplate="%{x}<br>판매: %{y:,.0f}대<extra></extra>",
+        ),
+        secondary_y=False,
     )
     fig.add_trace(
         go.Scatter(
-            x=df["날짜"],
-            y=df["수출량"],
-            name="수출량",
+            x=years,
+            y=df["Export_Ratio"],
+            name="수출률",
             mode="lines+markers",
-            line=dict(color="#1565C0", width=2.6),
-            marker=dict(size=6),
-            hovertemplate="%{x|%Y-%m}<br>수출: %{y:,.0f}대<extra></extra>",
-        )
+            line=dict(color="#F9A825", width=2.6),
+            marker=dict(size=7, color="#F9A825"),
+            hovertemplate="%{x}<br>수출률: %{y:.1f}%<extra></extra>",
+        ),
+        secondary_y=True,
     )
     fig.update_layout(
-        margin=dict(t=18, b=6, l=8, r=8),
-        height=180,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, xanchor="left"),
+        barmode="group",
+        height=OSD_CHART_HEIGHT,
+        margin=OSD_CHART_MARGIN,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            x=0,
+            xanchor="left",
+            font=dict(size=10),
+            bgcolor="rgba(0,0,0,0)",
+        ),
         hovermode="x unified",
-        barmode="overlay",
         autosize=True,
+        bargap=0.28,
+        bargroupgap=0.08,
     )
-    fig.update_xaxes(title_text=None, tickformat="%Y-%m", dtick="M1")
-    fig.update_yaxes(title_text="대수")
+    fig.update_xaxes(title_text=None, type="category")
+    fig.update_yaxes(title_text="대수", secondary_y=False, separatethousands=True)
+    fig.update_yaxes(title_text="수출률 (%)", secondary_y=True, range=[50, 90], showgrid=False)
     return fig
 
 
+def _latest_osd_row(df: pd.DataFrame) -> pd.Series:
+    ytd = df[df["Year"].astype(str) == OSD_YTD_LABEL]
+    if not ytd.empty:
+        return ytd.iloc[-1]
+    return df.iloc[-1]
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def _cached_osd_payload(n_months: int = OSD_MONTHS) -> dict:
-    try:
-        df = _fetch_osd_monthly()
-        is_dummy = False
-        source = "OSD"
-    except Exception:
-        df = build_osd_fallback(n_months=n_months)
-        is_dummy = True
-        source = "dummy:OSD-scale"
-
-    latest = df.iloc[-1]
-    prod_yoy = latest["생산_YoY"]
-    exp_yoy = latest["수출_YoY"]
-    if pd.isna(prod_yoy):
-        prod_yoy = 0.0
-    if pd.isna(exp_yoy):
-        exp_yoy = 0.0
-
+def _cached_osd_payload() -> dict:
+    df = build_osd_annual_fallback()
+    latest = _latest_osd_row(df)
     return {
         "df": df,
-        "is_dummy": is_dummy,
-        "source": source,
-        "latest_month": str(latest["연월"]),
-        "latest_production": int(latest["생산량"]),
-        "latest_export": int(latest["수출량"]),
-        "production_yoy": float(prod_yoy),
-        "export_yoy": float(exp_yoy),
+        "is_dummy": True,
+        "source": "dummy:OSD-annual (Excel 연동 뼈대)",
+        "latest_year": str(latest["Year"]),
+        "latest_production": int(latest["Production"]),
+        "latest_export": int(latest["Export"]),
+        "latest_sales": int(latest["Sales"]),
+        "latest_export_ratio": float(latest["Export_Ratio"]),
     }
 
 
-def get_osd_auto_trend(n_months: int = OSD_MONTHS) -> dict:
-    payload = dict(_cached_osd_payload(n_months))
+def get_osd_auto_trend() -> dict:
+    payload = dict(_cached_osd_payload())
     payload["figure"] = build_osd_figure(payload["df"])
     return payload
 
 
+def render_osd_industry_section(payload: dict | None = None) -> None:
+    """하단 우측 컬럼에 expander/tab 없이 OSD 요약+차트를 바로 그립니다."""
+    data = payload if payload and payload.get("figure") is not None else get_osd_auto_trend()
+    st.markdown(
+        "<div class='section-title'>🏭 OSD 자동차 산업 동향 (2021~2026 YTD)</div>",
+        unsafe_allow_html=True,
+    )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("총 생산량 (YTD)", f"{data['latest_production']:,}대")
+    m2.metric("총 판매량 (YTD)", f"{data['latest_sales']:,}대")
+    m3.metric("수출률", f"{data['latest_export_ratio']:.1f}%")
+    st.plotly_chart(
+        data["figure"],
+        width="stretch",
+        config={"displayModeBar": False, "responsive": True},
+    )
+
+
 def get_macro_industry_bundle() -> dict:
-    """대시보드 탭/컬럼용 패키지."""
+    """대시보드 컬럼용 패키지."""
     return {"inflation": get_cpi_ppi_trend(), "auto": get_osd_auto_trend()}
