@@ -735,8 +735,8 @@ def _figure_from_trend_df(df: pd.DataFrame) -> go.Figure:
     )
 
     fig.update_layout(
-        margin=dict(t=18, b=6, l=8, r=8),
-        height=180,
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=420,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
         autosize=True,
