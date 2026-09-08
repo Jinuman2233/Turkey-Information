@@ -17,7 +17,8 @@
 #   2) 터키 소비자물가지수(TÜİK TÜFE/CPI) 3년 장기 추이 + 최근 12개월 MoM 표
 #   3) 거시·자동차 산업 요약 (CPI/PPI 24개월, OSD 생산·수출 12개월)
 #   3) 터키 기준금리 (최근 2년 월별 그래프)
-#   4) 터키 최저임금
+#   4) MESS·Türk Metal 단체협약(CBA) 인상률
+#   5) 터키 최저임금
 #      - 월 최저임금 (Gross, 세전 기준) + 환율 환산(EUR/USD/KRW)
 #      - 시간당 최저임금 (Gross, 세전 기준, 월 255시간 근무 가정) + 환율 환산(EUR/USD/KRW)
 #   5) 산업용 에너지·가스 단가 트렌드 (최근 36개월, TRY/EUR)
@@ -47,6 +48,7 @@ from modules.minimum_wage import (
 )
 from modules.energy_data import get_energy_price_bundle
 from modules.macro_industry import get_macro_industry_bundle
+from modules.cba_agreement import render_cba_agreement_section
 from modules.news_data import get_dummy_news
 from modules.news_crawler import (
     API_QUOTA_FALLBACK_MESSAGE,
@@ -609,6 +611,14 @@ st.caption(
     "⚠️ 기준금리 데이터는 참고용 샘플 데이터입니다. 실제 서비스에서는 터키 중앙은행(TCMB)의 "
     "공개 데이터 시스템(EVDS) API 등으로 교체하는 것을 권장합니다."
 )
+
+st.divider()
+
+
+# =============================================================================
+# 4-1. MESS · Türk Metal 단체협약(CBA) — 최저임금 바로 위
+# =============================================================================
+render_cba_agreement_section()
 
 st.divider()
 
