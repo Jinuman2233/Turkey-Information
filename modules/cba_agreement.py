@@ -33,6 +33,8 @@ CBA_DATA = {
         "2024 Sep ~ 2025 Mar",
         "2025 Mar ~ 2025 Sep",
         "2025 Sep ~ 2026 Mar",
+        "2026 Mar ~ 2026 Sep",
+        "2026 Sep ~ 2027 Mar",
     ],
     "Inflation (%)": [
         5.95,
@@ -48,6 +50,8 @@ CBA_DATA = {
         17.54,
         13.11,
         14.02,
+        16.29,
+        13.08,
     ],
     "CBA (%)": [
         18.49,
@@ -63,6 +67,8 @@ CBA_DATA = {
         20.54,
         13.11,
         29.00,
+        16.26,
+        14.58,
     ],
 }
 
@@ -89,7 +95,7 @@ def style_cba_dataframe(df: pd.DataFrame):
 
 
 def build_cba_period_figure(df: pd.DataFrame) -> go.Figure:
-    """13개 6개월 구간의 Inflation (%) vs CBA (%) 그룹 막대."""
+    """6개월 구간의 Inflation (%) vs CBA (%) 그룹 막대."""
     inflation_vals = df["Inflation (%)"].tolist()
     cba_vals = df["CBA (%)"].tolist()
     fig = go.Figure()
@@ -99,7 +105,7 @@ def build_cba_period_figure(df: pd.DataFrame) -> go.Figure:
             y=inflation_vals,
             name="Inflation (%)",
             marker_color="#1565C0",
-            text=[f"{val}%" for val in inflation_vals],
+            text=[f"{val:.2f}%" for val in inflation_vals],
             textposition="outside",
             textfont=dict(size=10),
             cliponaxis=False,
@@ -112,7 +118,7 @@ def build_cba_period_figure(df: pd.DataFrame) -> go.Figure:
             y=cba_vals,
             name="CBA (%)",
             marker_color="#C8102E",
-            text=[f"{val}%" for val in cba_vals],
+            text=[f"{val:.2f}%" for val in cba_vals],
             textposition="outside",
             textfont=dict(size=10),
             cliponaxis=False,
