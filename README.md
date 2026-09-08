@@ -42,7 +42,28 @@ PC와 스마트폰 어디서든 보기 좋도록 반응형 레이아웃으로 �
 │   ├── config.toml              # 테마/서버 설정
 │   └── secrets.toml.example     # API 키 설정 예시 (실제 secrets.toml은 Git에 올리지 않음)
 ├── .env.example                 # API 키 설정 예시 (.env 파일용)
+├── camera_viewer.py             # OpenCV 웹캠 뷰어 (독립 실행 스크립트, PyInstaller로 exe 빌드 가능)
 └── requirements.txt             # 필요한 파이썬 패키지 목록
+```
+
+## 웹캠 뷰어 (`camera_viewer.py`)
+
+대시보드와 별도로 동작하는 간단한 **웹캠 프리뷰 도구**입니다. OpenCV로 카메라 화면을
+실시간으로 보여주고, 키 입력으로 스냅샷을 저장할 수 있습니다.
+
+```bash
+python camera_viewer.py
+# 카메라 인덱스/저장 폴더/해상도 지정
+python camera_viewer.py --camera 1 --save-dir captures --width 1280 --height 720
+```
+
+- `q` 또는 `ESC`: 종료
+- `s` 또는 `Space`: 현재 화면을 `captures/` 폴더에 PNG로 저장 (Pillow 사용)
+
+단일 실행 파일(exe)로 빌드하려면 PyInstaller를 사용합니다.
+
+```bash
+pyinstaller --onefile --name camera_viewer camera_viewer.py
 ```
 
 ## 실행 방법
