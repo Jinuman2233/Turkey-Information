@@ -14,7 +14,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 CHART_HEIGHT = 240
-CHART_MARGIN = dict(t=25, b=10, l=10, r=10)
+CHART_MARGIN = dict(t=28, b=10, l=10, r=10)
+BAR_LABEL_FONT = dict(
+    size=14,
+    family="Arial Black, Helvetica Neue, Arial, sans-serif",
+    color="#111111",
+)
 CBA_CYCLE_START_ROWS = (0, 4, 8, 12)
 CBA_HIGHLIGHT_COLOR = "#e6f2ff"
 
@@ -107,7 +112,7 @@ def build_cba_period_figure(df: pd.DataFrame) -> go.Figure:
             marker_color="#1565C0",
             text=[f"{val:.2f}%" for val in inflation_vals],
             textposition="outside",
-            textfont=dict(size=10),
+            textfont=BAR_LABEL_FONT,
             cliponaxis=False,
             hovertemplate="%{x}<br>Inflation: %{y:.2f}%<extra></extra>",
         )
@@ -120,7 +125,7 @@ def build_cba_period_figure(df: pd.DataFrame) -> go.Figure:
             marker_color="#C8102E",
             text=[f"{val:.2f}%" for val in cba_vals],
             textposition="outside",
-            textfont=dict(size=10),
+            textfont=BAR_LABEL_FONT,
             cliponaxis=False,
             hovertemplate="%{x}<br>CBA: %{y:.2f}%<extra></extra>",
         )
@@ -147,7 +152,7 @@ def build_cba_period_figure(df: pd.DataFrame) -> go.Figure:
         xaxis_title=None,
     )
     fig.update_xaxes(tickangle=-40, tickfont=dict(size=8), type="category")
-    fig.update_yaxes(range=[0, max_val * 1.15], ticksuffix="")
+    fig.update_yaxes(range=[0, max_val * 1.22], ticksuffix="")
     return fig
 
 
